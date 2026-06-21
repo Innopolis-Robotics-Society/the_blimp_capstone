@@ -1,0 +1,2 @@
+# Pinned docs toolchain (used by CI to build the site)
+mkdocs-material>=9.5,<10

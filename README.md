@@ -1,3 +1,7 @@
-# the_blimp_capstone
+# The Blimp Capstone
 
-хых
+Autonomous indoor airship by Innopolis Robotics Society.
+
+хи-хи, ха-ха
+
+Docs are auto-published to GitHub Pages
