@@ -3,6 +3,35 @@
 #   docker compose --profile replay up --build   демо из записи, железо не нужно
 #   docker compose up dashboard                  только веб-дашборд (UDP :9999 ждёт данных)
 services:
+  info:
+    build: .
+    depends_on: [dashboard]
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        cat <<'EOF'
+
+        ╔════════════════════════════════════════════════════════════════╗
+        ║  Blimp UWB dashboard — 3D-визуализация сети Nooploop LinkTrack  ║
+        ╚════════════════════════════════════════════════════════════════╝
+
+          Интерфейс:   http://localhost:8000
+                       (с другого устройства: http://<IP этой машины>:8000)
+
+          Показывает якоря A0..A3, теги T1 (нос) / T2 (корма), ось блимпа
+          с курсом, дальности до якорей. Координаты якорей — в панели
+          «Якоря» интерфейса или в файле dashboard/anchors.json.
+
+          Источник данных (профили):
+            docker compose --profile live up -d     живая консоль P-A (USB)
+            docker compose --profile replay up -d   запись, железо не нужно
+
+          Если сцена пустая — теги спят/выключены: консоль шлёт пустые
+          keep-alive кадры 1 Гц, точки появятся сами при включении тегов.
+        EOF
+
   dashboard:
     build: .
     command: blimp-dashboard --http-port 8000 --udp-port 9999 --anchors /config/anchors.json
