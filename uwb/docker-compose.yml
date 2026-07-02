@@ -1,0 +1,34 @@
+# UWB positioning stack:
+#   docker compose --profile live up --build     живое железо (консоль P-A по USB)
+#   docker compose --profile replay up --build   демо из записи, железо не нужно
+#   docker compose up dashboard                  только веб-дашборд (UDP :9999 ждёт данных)
+services:
+  dashboard:
+    build: .
+    command: blimp-dashboard --http-port 8000 --udp-port 9999 --anchors /config/anchors.json
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./dashboard/anchors.json:/config/anchors.json
+    restart: unless-stopped
+
+  nlink:
+    build: .
+    profiles: [live]
+    command: sh -c 'nlink-dump --port "$$UWB_PORT" --baud "$$UWB_BAUD" --udp dashboard:9999 --quiet'
+    environment:
+      UWB_PORT: ${UWB_PORT:-/dev/ttyCH343USB0}
+      UWB_BAUD: ${UWB_BAUD:-921600}
+    devices:
+      - ${UWB_PORT:-/dev/ttyCH343USB0}:${UWB_PORT:-/dev/ttyCH343USB0}
+    depends_on: [dashboard]
+    restart: unless-stopped
+
+  replay:
+    build: .
+    profiles: [replay]
+    command: nlink-dump --replay /data/uwb_live.bin --replay-delay 0.05 --loop --udp dashboard:9999 --quiet
+    volumes:
+      - ./recordings:/data:ro
+    depends_on: [dashboard]
+    restart: unless-stopped

@@ -42,22 +42,27 @@ class FileReplayReader:
     """Replays a recorded raw stream in chunks.
 
     `chunk_delay` (seconds between chunks) throttles the replay; 0 replays as
-    fast as possible.
+    fast as possible. With `loop=True` the file is replayed from the start
+    again once exhausted (endless demo stream).
     """
 
     def __init__(self, path: str, chunk_size: int = 512,
-                 chunk_delay: float = 0.0):
+                 chunk_delay: float = 0.0, loop: bool = False):
         self._path = path
         self._chunk_size = chunk_size
         self._chunk_delay = chunk_delay
+        self._loop = loop
 
     def run(self, feed: Callable[[bytes], None],
             should_stop: Optional[Callable[[], bool]] = None) -> None:
-        with open(self._path, "rb") as f:
-            while not (should_stop and should_stop()):
-                chunk = f.read(self._chunk_size)
-                if not chunk:
-                    break
-                feed(chunk)
-                if self._chunk_delay > 0:
-                    time.sleep(self._chunk_delay)
+        while True:
+            with open(self._path, "rb") as f:
+                while not (should_stop and should_stop()):
+                    chunk = f.read(self._chunk_size)
+                    if not chunk:
+                        break
+                    feed(chunk)
+                    if self._chunk_delay > 0:
+                        time.sleep(self._chunk_delay)
+            if not self._loop or (should_stop and should_stop()):
+                break

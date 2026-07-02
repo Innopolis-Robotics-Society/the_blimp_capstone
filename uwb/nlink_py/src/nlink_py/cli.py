@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="append the raw serial stream to FILE")
     parser.add_argument("--replay-delay", type=float, default=0.0,
                         help="seconds between replayed 512-byte chunks")
+    parser.add_argument("--loop", action="store_true",
+                        help="restart the replay when the file ends")
     parser.add_argument("--quiet", action="store_true",
                         help="do not print JSON lines to stdout")
     return parser
@@ -63,7 +65,8 @@ def main(argv=None) -> int:
     if args.port:
         reader = SerialReader(args.port, args.baud, record_path=args.record)
     else:
-        reader = FileReplayReader(args.replay, chunk_delay=args.replay_delay)
+        reader = FileReplayReader(args.replay, chunk_delay=args.replay_delay,
+                                  loop=args.loop)
 
     try:
         reader.run(extractor.feed)

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blimp-dashboard"
+version = "0.1.0"
+description = "3D web dashboard for Nooploop LinkTrack UWB positioning (the_blimp project)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.scripts]
+blimp-dashboard = "blimp_dashboard.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+blimp_dashboard = ["static/*"]
