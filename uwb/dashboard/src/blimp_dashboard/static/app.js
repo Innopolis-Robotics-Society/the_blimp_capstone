@@ -6,13 +6,45 @@ import { OrbitControls } from './OrbitControls.js';
 const TAG_COLORS = { 1: 0x2bd96f, 2: 0xff9f43 }; // 1 = нос, 2 = корма
 const TRAIL_LEN = 500;
 
+// Переменные для записи логов экспериментов (User Story 7)
+let isRecording = false;
+let recordStartTime = 0;
+let recordedData = []; // Сюда будем собирать кадры
+
 // ---------------------------------------------------------------- scene
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 
 const scene = new THREE.Scene();
+// Оставляем темный цвет как заглушку, пока грузится картинка
 scene.background = new THREE.Color(0x0b0e14);
+// Создаем загрузчик текстур
+const textureLoader = new THREE.TextureLoader();
+
+textureLoader.load('./static/sky.jpg', function(texture) {
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    // 1. Создаем огромную сферу (радиус 150 метров)
+    const skyGeo = new THREE.SphereGeometry(150, 32, 32);
+
+    // 2. Создаем материал
+    const skyMat = new THREE.MeshBasicMaterial({
+        map: texture,
+        side: THREE.BackSide, // ВАЖНО: Рисуем текстуру ВНУТРИ сферы, а не снаружи!
+        depthWrite: false     // Чтобы небо всегда было на заднем плане
+    });
+
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+
+    // 3. Поворачиваем саму сферу на 90 градусов (компенсируем ваш Z-up)
+    sky.rotation.x = Math.PI / 2;
+
+    sky.scale.x = -1
+
+    // Добавляем небо на сцену
+    scene.add(sky);
+});
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 200);
 camera.up.set(0, 0, 1);
@@ -21,6 +53,7 @@ camera.position.set(7, -6, 5);
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(2, 2, 0);
 controls.enableDamping = true;
+controls.maxDistance = 30;
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -28,8 +61,25 @@ sun.position.set(5, -8, 12);
 scene.add(sun);
 
 const grid = new THREE.GridHelper(30, 30, 0x33415c, 0x1c2333);
-grid.rotation.x = Math.PI / 2; // default grid lies in XZ; rotate into XY floor
+grid.rotation.x = Math.PI / 2;
 scene.add(grid);
+
+// ----- floor -----
+const floorTexture = new THREE.TextureLoader().load("./static/floor.png");
+floorTexture.colorSpace = THREE.SRGBColorSpace;
+
+const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(30, 30),
+    new THREE.MeshBasicMaterial({
+        map: floorTexture,
+        transparent: true
+    })
+);
+
+floor.position.set(0, 0, -0.01);
+scene.add(floor);
+// ------------------
+
 scene.add(new THREE.AxesHelper(1.2));
 
 function resize() {
@@ -218,11 +268,174 @@ function updateRanges() {
     if (!used.has(key)) rl.line.visible = rl.label.visible = false;
   }
 }
+// ---------------------------------------------------------------- waypoints (Миссии)
+let waypoints = []; // Массив точек миссии
+const waypointsGroup = new THREE.Group();
+scene.add(waypointsGroup);
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+// Добавляем точку ДВОЙНЫМ кликом по полу (floor)
+canvas.addEventListener('dblclick', (event) => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObject(floor);
+
+  if (intersects.length > 0) {
+    const hit = intersects[0].point;
+    hit.z = 0; // Точка ставится строго на пол
+    waypoints.push(hit);
+    updateWaypointsVisuals(); // Перерисовываем
+  }
+});
+
+function updateWaypointsVisuals() {
+  waypointsGroup.clear(); // Очищаем 3D объекты маршрута
+  const listEl = document.getElementById('wp-list');
+  listEl.innerHTML = '';  // Очищаем HTML список на панели
+
+  // Задача 5: Обновление калькулятора параметров пути
+  updateRouteStats();
+
+  if (waypoints.length === 0) {
+      listEl.innerHTML = '<div style="color: #7f8ca6; font-size: 11px; text-align:center;">Двойной клик по карте<br>для установки точек</div>';
+      return;
+  }
+
+  // 1. Рисуем 3D-линию.
+  const mat = new THREE.LineBasicMaterial({ color: 0xffaa00, linewidth: 2 });
+  const geo = new THREE.BufferGeometry().setFromPoints(waypoints);
+  const line = new THREE.Line(geo, mat);
+  waypointsGroup.add(line);
+
+  // 2. Рисуем 3D-сферы и добавляем HTML-ярлыки с крестиками
+  waypoints.forEach((wp, index) => {
+    // 3D Сфера
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.1, 16, 16),
+      new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0xffaa00 })
+    );
+    sphere.position.copy(wp);
+    waypointsGroup.add(sphere);
+
+    // 3D Подпись P1, P2...
+    const label = makeLabel(`P${index + 1}`, '#ffaa00', 0.35);
+    label.position.set(wp.x, wp.y, wp.z + 0.3);
+    waypointsGroup.add(label);
+
+    // HTML-элемент в панели с КРЕСТИКОМ ✖
+    const wpDiv = document.createElement('div');
+    wpDiv.className = 'wp-item';
+    wpDiv.innerHTML = `
+      <span><b>P${index + 1}</b> [${wp.x.toFixed(1)}, ${wp.y.toFixed(1)}]</span>
+      <span class="wp-del" onclick="deleteWaypoint(${index})" title="Удалить точку">✖</span>
+    `;
+    listEl.appendChild(wpDiv);
+  });
+}
+
+// Задача 5: Функция калькулятора параметров пути (длина и время)
+function updateRouteStats() {
+  const statsEl = document.getElementById('route-stats');
+  if (waypoints.length < 2) {
+    statsEl.style.display = 'none';
+    return;
+  }
+
+  let totalDist = 0;
+  for (let i = 1; i < waypoints.length; i++) {
+    // Считаем 3D-расстояние между соседними точками вектора
+    totalDist += waypoints[i].distanceTo(waypoints[i - 1]);
+  }
+
+  // Примерное время полета исходя из средней скорости блимпа ~0.3 м/с
+  const estTime = Math.round(totalDist / 0.3);
+
+  statsEl.textContent = `Длина: ${totalDist.toFixed(2)} м | Время: ~${estTime} сек`;
+  statsEl.style.display = 'block';
+}
+
+// Глобальная функция для удаления точки (крестик вызывает её по index)
+window.deleteWaypoint = (index) => {
+  waypoints.splice(index, 1); // Магия здесь: splice вырезает ровно 1 точку
+  updateWaypointsVisuals();   // При перерисовке линии соседи соединятся сами
+};
+
+// Глобальная функция очистки всего маршрута
+window.clearWaypoints = () => {
+  waypoints = [];
+  updateWaypointsVisuals();
+};
+
+// Глобальная функция отправки на сервер
+window.sendMission = () => {
+  if (waypoints.length === 0) return alert("Добавьте точки маршрута!");
+
+  const missionData = waypoints.map(wp => ({ x: wp.x, y: wp.y, z: wp.z }));
+
+  fetch('/upload_route', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(missionData)
+  }).then(res => {
+    if(res.ok) {
+        // Меняем цвет линии на зеленый в знак успеха
+        waypointsGroup.children[0].material.color.setHex(0x2bd96f);
+    }
+  }).catch(err => console.error(err));
+};
+
+// Инициализация пустой панели при старте
+updateWaypointsVisuals();
+// ----------------------------------------------------------------
 
 // ---------------------------------------------------------------- frames
 let frameCount = 0, lastVoltage = null;
 
 function handleFrame(f) {
+  if (f.mode || f.flight_mode) {
+    const mode = f.mode || f.flight_mode;
+    const modeEl = document.getElementById('control-mode');
+
+    if (mode === 'MANUAL' || mode === 'STABILIZE' || mode === 'ALT_HOLD') {
+      modeEl.textContent = `${mode} (ПИЛОТ)`;
+      modeEl.style.color = '#4ea1ff'; // Красивый синий цвет для ручного контроля
+    } else if (mode === 'GUIDED' || mode === 'AUTO') {
+      modeEl.textContent = `${mode} (АВТОПИЛОТ)`;
+      modeEl.style.color = '#2bd96f'; // Зеленый цвет для автономии
+    } else {
+      modeEl.textContent = mode;
+      modeEl.style.color = '#e8eefc';
+    }
+  }
+
+  // --- Накапливаем кадры в лог, если идет запись (User Story 7) ---
+  if (isRecording && f.frame_type === 'anchorframe0') {
+    // Считаем время в секундах с момента нажатия кнопки Старт
+    const elapsedSeconds = ((Date.now() - recordStartTime) / 1000).toFixed(3);
+    const currentMode = document.getElementById('control-mode').textContent || '—';
+
+    for (const n of f.nodes ?? []) {
+      if (n.role !== 2) continue; // Берем только метки (Tag)
+
+      // Добавляем строчку данных в массив
+      recordedData.push([
+        elapsedSeconds,
+        n.id,
+        n.pos_3d[0].toFixed(3), // X
+        n.pos_3d[1].toFixed(3), // Y
+        n.pos_3d[2].toFixed(3), // Z
+        lastVoltage !== null ? lastVoltage.toFixed(2) : '',
+        currentMode
+      ]);
+    }
+  }
+  // -----------------------------------------------------------------
+
   if (f.frame_type !== 'anchorframe0') return;
   frameCount++;
   lastVoltage = f.voltage;
@@ -261,12 +474,101 @@ document.getElementById('opt-ema').addEventListener('input', (e) => {
   document.getElementById('ema-val').textContent = Number(e.target.value).toFixed(2);
 });
 
-// ---------------------------------------------------------------- HUD
+// Обработчик кнопки записи лога теста
+const btnRecord = document.getElementById('btn-record');
+const inputNotes = document.getElementById('log-notes');
+
+btnRecord.addEventListener('click', () => {
+  if (!isRecording) {
+    // ЗАПУСК ЗАПИСИ
+    isRecording = true;
+    recordStartTime = Date.now();
+    recordedData = []; // Очищаем старые данные
+
+    btnRecord.textContent = '■ Остановить и скачать';
+    btnRecord.style.background = '#e05252'; // Красный цвет кнопки
+    btnRecord.style.color = '#white';
+    inputNotes.disabled = true; // Блокируем поле ввода во время теста
+    console.log("Запись эксперимента запущена...");
+  } else {
+    // ОСТАНОВКА ЗАПИСИ И СКАЧИВАНИЕ
+    isRecording = false;
+    btnRecord.textContent = '● Начать запись';
+    btnRecord.style.background = '#1d2636';
+    btnRecord.style.color = '#e8eefc';
+    inputNotes.disabled = false; // Разблокируем поле ввода
+
+    console.log("Запись остановлена. Генерируем CSV...");
+    downloadCSV();
+  }
+});
+
+// Функция генерации и автоматического скачивания CSV файла браузером
+function downloadCSV() {
+  if (recordedData.length === 0) {
+    alert("Нет данных для сохранения! Возможно, дирижабль не прислал ни одного кадра.");
+    return;
+  }
+
+  const notes = inputNotes.value.trim() || "без_заметки";
+
+  let csvContent = "";
+  // Добавляем метаданные в шапку файла
+  csvContent += `# Эксперимент: ${notes}\r\n`;
+  csvContent += `# Дата записи: ${new Date().toLocaleString()}\r\n`;
+  csvContent += "Time_s,Tag_ID,X_m,Y_m,Z_m,Voltage_V,Flight_Mode\r\n";
+
+  recordedData.forEach(row => {
+    csvContent += row.join(",") + "\r\n";
+  });
+
+  // Добавляем маркер BOM (\ufeff), чтобы Excel на Windows корректно читал русские буквы в заметках
+  const blob = new Blob(["\ufeff" + csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+
+  // Очищаем имя файла от недопустимых символов
+  const cleanNotes = notes.replace(/[^a-z0-9а-яё\s-_]/gi, '').replace(/\s+/g, '_');
+  const filename = `blimp_test_${cleanNotes}_${Date.now()}.csv`;
+
+  link.setAttribute("href", url);
+  link.setAttribute("download", filename);
+  document.body.appendChild(link);
+
+  link.click(); // Запускаем скачивание в браузере
+  document.body.removeChild(link);
+}
+
+// ---------------------------------------------------------------- HUD (Обновление каждые 500мс)
 setInterval(() => {
-  document.getElementById('rate').textContent = `${(frameCount / 0.5).toFixed(0)} Гц`;
+  const currentRate = frameCount / 0.5;
+  document.getElementById('rate').textContent = `${currentRate.toFixed(0)} Гц`;
+
+  // --- Задача 2: Аварийный светофор Failsafe ---
+  const banner = document.getElementById('failsafe-banner');
+  let failsafeMsg = "";
+
+  if (currentRate === 0) {
+    // Если за полсекунды не пришло ни одного пакета UWB
+    failsafeMsg = "⚠️ АВАРИЯ: ПОТЕРЯ СВЯЗИ UWB";
+  } else if (lastVoltage !== null && lastVoltage > 1.0 && lastVoltage < 7.00) {
+    // Если батарея дирижабля 2S разряжена ниже 7.0 Вольт
+    failsafeMsg = "⚠️ АВАРИЯ: НИЗКИЙ ЗАРЯД БАТАРЕИ 2S";
+  }
+
+  if (failsafeMsg) {
+    banner.textContent = failsafeMsg;
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+  // --------------------------------------------
+
   frameCount = 0;
   document.getElementById('voltage').textContent =
     lastVoltage == null ? '— В' : `${lastVoltage.toFixed(2)} В`;
+
   const el = document.getElementById('tags');
   el.innerHTML = '';
   for (const [id, tag] of [...tags].sort((a, b) => a[0] - b[0])) {

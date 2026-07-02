@@ -10,37 +10,95 @@
     background: #0b0e14; color: #cdd6e4;
     font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   #scene { position: absolute; inset: 0; }
+  #log-notes::placeholder {
+    font-style: italic;
+  }
+
+  /* Левая панель (Телеметрия) */
   #hud { position: absolute; top: 12px; left: 12px; width: 265px;
     background: rgba(16, 20, 30, 0.88); border: 1px solid #2a3245;
-    border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(4px); }
+    border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(4px); z-index: 100; }
   #hud h1 { font-size: 14px; margin: 0 0 8px; color: #e8eefc; }
-  #hud h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
-    color: #7f8ca6; margin: 12px 0 4px; }
+  #hud h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #7f8ca6; margin: 12px 0 4px; }
+
+  /* Правый сайдбар, объединяющий Маршрут и Логирование */
+  #right-sidebar {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px; /* Расстояние между блоками */
+    z-index: 100;
+  }
+
+  /* Стили для боксов в правом сайдбаре */
+  .sidebar-box {
+    background: rgba(16, 20, 30, 0.88);
+    border: 1px solid #2a3245;
+    border-radius: 10px;
+    padding: 12px 14px;
+    backdrop-filter: blur(4px);
+    box-sizing: border-box;
+  }
+  .sidebar-box h1 { font-size: 14px; margin: 0 0 8px; color: #e8eefc; }
+
   .row { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; }
   .val { color: #e8eefc; font-variant-numeric: tabular-nums; }
-  #ws-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-    background: #e05252; margin-right: 6px; vertical-align: -1px; }
+  #ws-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #e05252; margin-right: 6px; vertical-align: -1px; }
   #ws-dot.ok { background: #2bd96f; }
-  .tag-card { border-left: 3px solid #555; padding: 3px 8px; margin: 6px 0;
-    background: rgba(255,255,255,0.03); border-radius: 4px; }
+  .tag-card { border-left: 3px solid #555; padding: 3px 8px; margin: 6px 0; background: rgba(255,255,255,0.03); border-radius: 4px; }
   label.chk { display: block; margin: 3px 0; cursor: pointer; }
   input[type=range] { width: 110px; vertical-align: middle; }
   table#anchors-tbl { border-collapse: collapse; width: 100%; }
   #anchors-tbl td { padding: 1px 2px; }
-  #anchors-tbl input { width: 52px; background: #131824; color: #e8eefc;
-    border: 1px solid #2a3245; border-radius: 4px; padding: 2px 4px; font-size: 12px; }
-  button { background: #1d2636; color: #e8eefc; border: 1px solid #33415c;
-    border-radius: 6px; padding: 4px 10px; cursor: pointer; margin-top: 6px; }
+  #anchors-tbl input { width: 52px; background: #131824; color: #e8eefc; border: 1px solid #2a3245; border-radius: 4px; padding: 2px 4px; font-size: 12px; }
+
+  /* Кнопки */
+  button { background: #1d2636; color: #e8eefc; border: 1px solid #33415c; border-radius: 6px; padding: 6px 10px; cursor: pointer; margin-top: 6px; width: 100%; box-sizing: border-box;}
   button:hover { background: #263349; }
-  #save-status { margin-left: 8px; font-size: 12px; }
+
+  /* Список точек маршрута */
+  .wp-item { display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.05); padding: 4px 8px; margin: 4px 0; border-radius: 4px; font-size: 12px; border-left: 3px solid #ffaa00;}
+  .wp-del { color: #e05252; cursor: pointer; font-size: 14px; font-weight: bold; padding: 0 5px; }
+  .wp-del:hover { color: #ff7676; }
+
+  /* Задача 2: Аварийный баннер Failsafe */
+  #failsafe-banner {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(224, 82, 82, 0.95);
+    color: white;
+    border: 1px solid #ff7676;
+    padding: 8px 18px;
+    border-radius: 8px;
+    font-weight: bold;
+    font-size: 13px;
+    display: none;
+    z-index: 1000;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    backdrop-filter: blur(4px);
+    letter-spacing: 0.05em;
+  }
 </style>
 </head>
 <body>
 <canvas id="scene"></canvas>
+
+<!-- Задача 2: Выплывающий баннер аварийных режимов -->
+<div id="failsafe-banner">⚠️ АВАРИЯ: ПОТЕРЯ СВЯЗИ UWB</div>
+
+<!-- Левая панель -->
 <div id="hud">
   <h1>🎈 Blimp UWB</h1>
   <div class="row"><span><span id="ws-dot"></span>поток</span><span class="val" id="rate">— Гц</span></div>
   <div class="row"><span>консоль</span><span class="val" id="voltage">— В</span></div>
+
+  <!-- Задача 3: Режим контроля (Пилот / Автопилот) -->
+  <div class="row"><span>контроль</span><span class="val" id="control-mode" style="color: #4ea1ff; font-weight: bold;">MANUAL (ПИЛОТ)</span></div>
 
   <h2>Теги</h2>
   <div id="tags"></div>
@@ -58,6 +116,30 @@
   <table id="anchors-tbl"></table>
   <button id="btn-save">сохранить</button><span id="save-status"></span>
 </div>
+
+<!-- Правый сайдбар -->
+<div id="right-sidebar">
+
+  <!-- БОКС 1: МАРШРУТ -->
+  <div class="sidebar-box" id="mission-hud">
+    <h1>🗺️ Маршрут</h1>
+    <div id="route-stats" style="font-size: 11px; color: #6d7c96; font-weight: 300; margin-bottom: 2px; display: none;">Длина: 0.0 м | Время: ~0 сек</div>
+    <div id="wp-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 10px;"></div>
+    <button onclick="clearWaypoints()">Очистить маршрут</button>
+    <button onclick="sendMission()" style="background: #2bd96f; color: black; font-weight: bold; border:none;">Отправить на борт</button>
+  </div>
+
+  <!-- БОКС 2: ЗАПИСЬ ТЕСТА (User Story 7) -->
+  <div class="sidebar-box">
+    <h1>📝 Запись теста</h1>
+    <div class="row" style="margin-bottom: 6px;">
+      <input type="text" id="log-notes" placeholder="Заметка к эксперименту" style="width: 100%; background: #131824; color: #e8eefc; border: 1px solid #2a3245; border-radius: 4px; padding: 5px 8px; font-size: 12px; box-sizing: border-box;">
+    </div>
+    <button id="btn-record" style="font-weight: bold; background: #1d2636; color: #e8eefc;">● Начать запись</button>
+  </div>
+
+</div>
+
 <script type="importmap">
   { "imports": { "three": "./static/three.module.js" } }
 </script>
