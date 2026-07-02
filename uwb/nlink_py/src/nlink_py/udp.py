@@ -18,14 +18,22 @@ def json_dumps(frame: dict) -> str:
 
 
 class UdpJsonPublisher:
-    """Sends one JSON datagram per parsed frame."""
+    """Sends one JSON datagram per parsed frame.
+
+    Send errors (unresolvable/unreachable destination, e.g. the consumer
+    container restarting) drop the frame instead of raising: UDP is lossy by
+    design and the stream must survive consumer downtime.
+    """
 
     def __init__(self, host: str, port: int):
         self._addr = (host, port)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def send(self, frame: dict) -> None:
-        self._sock.sendto(json_dumps(frame).encode(), self._addr)
+        try:
+            self._sock.sendto(json_dumps(frame).encode(), self._addr)
+        except OSError:
+            pass
 
     def close(self) -> None:
         self._sock.close()
