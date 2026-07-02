@@ -1,0 +1,6 @@
+[submodule "uwb/extern/protocol_extracter"]
+	path = uwb/extern/protocol_extracter
+	url = https://github.com/nooploop-dev/protocol_extracter.git
+[submodule "uwb/extern/nlink_unpack"]
+	path = uwb/extern/nlink_unpack
+	url = https://github.com/nooploop-dev/nlink_unpack.git
