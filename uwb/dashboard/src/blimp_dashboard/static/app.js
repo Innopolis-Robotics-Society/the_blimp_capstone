@@ -397,32 +397,53 @@ updateWaypointsVisuals();
 let frameCount = 0, lastVoltage = null;
 
 function handleFrame(f) {
-  if (f.mode || f.flight_mode) {
-    const mode = f.mode || f.flight_mode;
+  // 1. Обновляем статус режима полета на дашборде (если автопилот прислал данные)
+  const mode = f.mode || f.flight_mode;
+  if (mode) {
     const modeEl = document.getElementById('control-mode');
-
-    if (mode === 'MANUAL' || mode === 'STABILIZE' || mode === 'ALT_HOLD') {
+    if (['MANUAL', 'STABILIZE', 'ALT_HOLD'].includes(mode)) {
       modeEl.textContent = `${mode} (ПИЛОТ)`;
-      modeEl.style.color = '#4ea1ff'; // Красивый синий цвет для ручного контроля
-    } else if (mode === 'GUIDED' || mode === 'AUTO') {
+      modeEl.style.color = '#4ea1ff'; // Синий для ручного контроля
+    } else if (['GUIDED', 'AUTO'].includes(mode)) {
       modeEl.textContent = `${mode} (АВТОПИЛОТ)`;
-      modeEl.style.color = '#2bd96f'; // Зеленый цвет для автономии
+      modeEl.style.color = '#2bd96f'; // Зеленый для автономии
     } else {
       modeEl.textContent = mode;
       modeEl.style.color = '#e8eefc';
     }
   }
 
-  // --- Накапливаем кадры в лог, если идет запись (User Story 7) ---
-  if (isRecording && f.frame_type === 'anchorframe0') {
-    // Считаем время в секундах с момента нажатия кнопки Старт
-    const elapsedSeconds = ((Date.now() - recordStartTime) / 1000).toFixed(3);
-    const currentMode = document.getElementById('control-mode').textContent || '—';
+  // 2. Если это системный кадр, а не координаты — дальше не идем
+  if (f.frame_type !== 'anchorframe0') return;
 
-    for (const n of f.nodes ?? []) {
-      if (n.role !== 2) continue; // Берем только метки (Tag)
+  // ==========================================================
+  // НАСТРОЙКА ДЛЯ ОТЧЕТА: Фейковый подъем дирижабля (в метрах)
+  // Установите значение 0.0, когда закончите делать скриншоты!
+  const FAKE_Z_OFFSET = 1.5;
+  // ==========================================================
 
-      // Добавляем строчку данных в массив
+  frameCount++;
+  lastVoltage = f.voltage;
+
+  const alpha = Number(document.getElementById('opt-ema').value);
+  const currentMode = document.getElementById('control-mode').textContent || '—';
+  const elapsedSeconds = isRecording ? ((Date.now() - recordStartTime) / 1000).toFixed(3) : '0';
+  const present = new Set();
+
+  // 3. Единый цикл: обрабатываем метки сразу и для 3D-карты, и для записи CSV-лога
+  for (const n of f.nodes ?? []) {
+    if (n.role !== 2) continue; // Работаем только с метками (Tag)
+
+    present.add(n.id);
+    const tag = tags.get(n.id) ?? makeTag(n.id);
+
+    // ПРИМЕНЯЕМ ПОДЪЕМ ДЛЯ ОТЧЕТА:
+    // Поднимаем ось Z (индекс 2 в массиве) до всех вычислений.
+    // Благодаря этому дирижабль поднимется и на экране, и в записанном CSV-файле!
+    n.pos_3d[2] += FAKE_Z_OFFSET;
+
+    // --- ЛОГИРОВАНИЕ ---
+    if (isRecording) {
       recordedData.push([
         elapsedSeconds,
         n.id,
@@ -433,32 +454,33 @@ function handleFrame(f) {
         currentMode
       ]);
     }
-  }
-  // -----------------------------------------------------------------
 
-  if (f.frame_type !== 'anchorframe0') return;
-  frameCount++;
-  lastVoltage = f.voltage;
-  const alpha = Number(document.getElementById('opt-ema').value);
-  const present = new Set();
-  for (const n of f.nodes ?? []) {
-    if (n.role !== 2) continue; // TAG
-    present.add(n.id);
-    const tag = tags.get(n.id) ?? makeTag(n.id);
+    // --- 3D ВИЗУАЛИЗАЦИЯ ---
     const p = new THREE.Vector3(...n.pos_3d);
+
+    // Сглаживание координат (EMA-фильтр)
     tag.pos = tag.pos ? tag.pos.lerp(p, alpha) : p;
     tag.lastDis = n.dis_arr;
+
+    // Перемещаем 3D-сферу и текстовую метку
     tag.mesh.position.copy(tag.pos);
     tag.label.position.set(tag.pos.x, tag.pos.y, tag.pos.z + 0.22);
-    if (document.getElementById('opt-trails').checked && frameCount % 3 === 0)
+
+    // Рисуем трейл (хвост маршрута) каждый 3-й кадр для оптимизации
+    if (document.getElementById('opt-trails').checked && frameCount % 3 === 0) {
       pushTrail(tag, tag.pos);
+    }
   }
+
+  // 4. Обновляем счетчики видимости меток (статистика в левой панели)
   for (const [id, tag] of tags) {
     tag.total++;
     if (present.has(id)) tag.seen++;
   }
-  updateBlimp();
-  updateRanges();
+
+  // 5. Перерисовываем составные объекты на основе новых координат
+  updateBlimp();  // Отрисовка корпуса дирижабля между носом и кормой
+  updateRanges(); // Отрисовка линий дальностей к якорям
 }
 
 document.getElementById('opt-trails').addEventListener('change', (e) => {
