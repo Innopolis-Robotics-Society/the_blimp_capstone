@@ -37,6 +37,7 @@ services:
     command: blimp-dashboard --http-port 8000 --udp-port 9999 --anchors /config/anchors.json
     ports:
       - "8000:8000"
+      - "14550:14550/udp"
     volumes:
       - ./dashboard/anchors.json:/config/anchors.json
     restart: unless-stopped

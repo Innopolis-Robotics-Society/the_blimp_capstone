@@ -206,6 +206,21 @@ const blimpArrow = new THREE.ArrowHelper(
 blimpBody.visible = blimpArrow.visible = false;
 scene.add(blimpBody, blimpArrow);
 
+// ==========================================================================
+// [НОВОЕ] Создаем синего "призрака" симулятора SITL
+const sitlBody = new THREE.Mesh(
+  new THREE.SphereGeometry(0.8, 24, 16), // Чуть меньше реального дирижабля
+  new THREE.MeshStandardMaterial({
+    color: 0x4ea1ff,
+    transparent: true,
+    opacity: 0.35,
+    wireframe: true // Делаем его красивой сеткой, как в фантастических фильмах!
+  })
+);
+sitlBody.visible = false; // Скрыт, пока симулятор не пришлет первый кадр
+scene.add(sitlBody);
+// ==========================================================================
+
 function updateBlimp() {
   const nose = tags.get(1)?.pos, stern = tags.get(2)?.pos;
   const ok = nose && stern;
@@ -397,6 +412,19 @@ updateWaypointsVisuals();
 let frameCount = 0, lastVoltage = null;
 
 function handleFrame(f) {
+  // --- [НОВОЕ] Отрисовка симулятора ---
+  if (f.frame_type === 'sitl_frame') {
+    // Двигаем синий каркасный шар в позицию, которую прислал SITL
+    sitlBody.position.set(f.x, f.y, f.z);
+    sitlBody.visible = true;
+
+    // Обновляем режим полетника на левой панели
+    if (f.mode) {
+      document.getElementById('control-mode').textContent = `${f.mode} (СИМУЛЯТОР)`;
+      document.getElementById('control-mode').style.color = '#4ea1ff';
+    }
+    return; // Выходим, так как в этом кадре нет UWB-тегов
+  }
   // 1. Обновляем статус режима полета на дашборде (если автопилот прислал данные)
   const mode = f.mode || f.flight_mode;
   if (mode) {
@@ -573,10 +601,10 @@ setInterval(() => {
 
   if (currentRate === 0) {
     // Если за полсекунды не пришло ни одного пакета UWB
-    failsafeMsg = "⚠️ АВАРИЯ: ПОТЕРЯ СВЯЗИ UWB";
+    failsafeMsg = "⚠️ ACCIDENT: UWB CONNECTION LOSS";
   } else if (lastVoltage !== null && lastVoltage > 1.0 && lastVoltage < 7.00) {
     // Если батарея дирижабля 2S разряжена ниже 7.0 Вольт
-    failsafeMsg = "⚠️ АВАРИЯ: НИЗКИЙ ЗАРЯД БАТАРЕИ 2S";
+    failsafeMsg = "⚠️ ACCIDENT: LOW BATTERY CHARGE 2S";
   }
 
   if (failsafeMsg) {
@@ -625,3 +653,40 @@ renderer.setAnimationLoop(() => {
   controls.update();
   renderer.render(scene, camera);
 });
+
+// --- Новые команды прямого пилотирования (светофорная индикация) ---
+window.armBlimp = () => {
+  const btn = document.getElementById('btn-arm');
+
+  fetch('/action/arm', { method: 'POST' })
+    .then(res => {
+      if (res.ok) {
+        // Успех: перекрашиваем кнопку в зеленый, делаем текст читаемым
+        btn.style.background = '#2bd96f';
+        btn.style.color = '#0b0e14';
+      } else {
+        alert("Не удалось завести моторы (проверьте связь с SITL)!");
+      }
+    })
+    .catch(err => alert("Ошибка связи с сервером!"));
+};
+
+window.takeoffBlimp = () => {
+  const btn = document.getElementById('btn-takeoff');
+
+  fetch('/action/takeoff', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ alt: 1.2 }) // Взлет на высоту 1.2 метра
+  })
+    .then(res => {
+      if (res.ok) {
+        // Успех: перекрашиваем кнопку в зеленый
+        btn.style.background = '#2bd96f';
+        btn.style.color = '#0b0e14';
+      } else {
+        alert("Не удалось отправить команду взлета!");
+      }
+    })
+    .catch(err => alert("Ошибка связи с сервером!"));
+};

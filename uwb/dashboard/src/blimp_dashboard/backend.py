@@ -17,6 +17,8 @@ class MAVLinkBackend:
 
         self.telemetry = {
             "position": {"lat": 0.0, "lon": 0.0, "alt": 0.0, "relative_alt": 0.0},
+            # --- НОВОЕ: Локальные координаты из симулятора ---
+            "local_position": {"x": 0.0, "y": 0.0, "z": 0.0},
             "battery": {"voltage": 0.0, "current": 0.0, "remaining": 0},
             "status": "disconnected"
         }
@@ -30,13 +32,49 @@ class MAVLinkBackend:
         thread.start()
 
     def _telemetry_loop(self):
+        # Переменные времени для периодических запросов
+        last_heartbeat = 0
+        last_stream_req = 0
+
         while self.running:
+            now = time.time()
+
+            # 1. Шлем HEARTBEAT раз в секунду, чтобы SITL знал, что мы - активная GCS
+            if now - last_heartbeat >= 1.0:
+                self.send_heartbeat()
+                last_heartbeat = now
+
+            # 2. Каждые 5 секунд принудительно требуем у SITL начать слать координаты
+            if now - last_stream_req >= 5.0:
+                try:
+                    # MAV_DATA_STREAM_ALL запрашивает все основные потоки (включая позицию)
+                    self.master.mav.request_data_stream_send(
+                        self.master.target_system,
+                        self.master.target_component,
+                        mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                        10,  # Частота отправки координат (10 кадров в секунду)
+                        1    # 1 = начать отправку, 0 = остановить
+                    )
+                    # logger.info("Requested data stream from SITL")
+                except Exception as e:
+                    logger.error(f"Failed to request data stream: {e}")
+                last_stream_req = now
+
+            # 3. Слушаем входящие сообщения
             msg = self.master.recv_match(blocking=True, timeout=0.1)
             if msg:
                 self._process_message(msg)
 
     def _process_message(self, msg):
         msg_type = msg.get_type()
+
+        # --- [НОВОЕ] Получаем локальные метры от симулятора ---
+        if msg_type == 'LOCAL_POSITION_NED':
+            self.telemetry["local_position"] = {
+                "x": msg.x,  # North (наш X)
+                "y": msg.y,  # East (наш Y)
+                "z": msg.z  # Down (наш -Z)
+            }
 
         if msg_type == 'GLOBAL_POSITION_INT':
             self.telemetry["position"] = {
@@ -112,6 +150,46 @@ class MAVLinkBackend:
         else:
             logger.error(f"Mission upload failed: {msg}")
             return False
+
+    def set_mode(self, mode_name: str):
+        # Ищем ID режима по его имени (например, 'GUIDED')
+        if mode_name not in self.master.mode_mapping():
+            logger.error(f"Unknown mode: {mode_name}")
+            return False
+
+        mode_id = self.master.mode_mapping()[mode_name]
+        self.master.mav.set_mode_send(
+            self.master.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            mode_id
+        )
+        logger.info(f"Command sent: Change mode to {mode_name}")
+        return True
+
+    def arm(self):
+        # Отправляем команду MAV_CMD_COMPONENT_ARM_DISARM
+        self.master.mav.command_long_send(
+            self.master.target_system,
+            self.master.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,  # confirmation
+            1,  # 1 = Arm, 0 = Disarm
+            0, 0, 0, 0, 0, 0
+        )
+        logger.info("Command sent: ARM")
+
+    def takeoff(self, altitude: float):
+        # Отправляем команду MAV_CMD_NAV_TAKEOFF
+        # Внимание: для взлета высота (param 7) указывается положительной (вверх)
+        self.master.mav.command_long_send(
+            self.master.target_system,
+            self.master.target_component,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0,  # confirmation
+            0, 0, 0, 0, 0, 0,
+            altitude  # Target altitude
+        )
+        logger.info(f"Command sent: TAKEOFF to {altitude}m")
 
     def get_telemetry(self):
         return self.telemetry.copy()

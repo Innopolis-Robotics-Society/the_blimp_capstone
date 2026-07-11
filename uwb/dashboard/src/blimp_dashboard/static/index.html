@@ -89,7 +89,7 @@
 <canvas id="scene"></canvas>
 
 <!-- Задача 2: Выплывающий баннер аварийных режимов -->
-<div id="failsafe-banner">⚠️ АВАРИЯ: ПОТЕРЯ СВЯЗИ UWB</div>
+<div id="failsafe-banner">⚠️ ACCIDENT: UWB CONNECTION LOSS</div>
 
 <!-- Левая панель -->
 <div id="hud">
@@ -119,6 +119,16 @@
 
 <!-- Правый сайдбар -->
 <div id="right-sidebar">
+
+  <!-- БОКС: УПРАВЛЕНИЕ -->
+  <div class="sidebar-box">
+    <h1>🛫 Управление</h1>
+    <div class="row" style="display: flex; gap: 8px;">
+      <!-- Обе кнопки изначально красные (#e05252) -->
+      <button id="btn-arm" onclick="armBlimp()" style="background: #e05252; color: white; margin-top: 0;">🛡️ Arm</button>
+      <button id="btn-takeoff" onclick="takeoffBlimp()" style="background: #e05252; color: white; margin-top: 0;">⬆️ Takeoff</button>
+    </div>
+  </div>
 
   <!-- БОКС 1: МАРШРУТ -->
   <div class="sidebar-box" id="mission-hud">
