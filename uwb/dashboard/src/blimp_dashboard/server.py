@@ -8,6 +8,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
+import math # [НОВОЕ] Добавили математическую библиотеку
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List
@@ -17,8 +19,36 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Back
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# [НОВОЕ] Импортируем класс связи с дирижаблем от команды SWP
+# Импортируем класс связи с дирижаблем от команды SWP
 from .backend import MAVLinkBackend
+
+# =================================================================
+# [НОВОЕ] ГЛОБАЛЬНЫЕ КООРДИНАТЫ СТАРТА (Университет Иннополис)
+# =================================================================
+ORIGIN_LAT = 55.7522
+ORIGIN_LON = 48.7446
+ORIGIN_ALT = 120.0
+
+def local_to_global_gps(x: float, y: float, z: float) -> tuple[float, float, float]:
+    """
+    Конвертирует локальные X, Y, Z координаты (в метрах) с дашборда
+    в глобальные GPS-координаты (Широта, Долгота, Высота) относительно Origin.
+    X -> North (Север), Y -> East (Восток), Z -> Up (Высота).
+    """
+    r_earth = 6378137.0 # Средний радиус Земли в метрах
+
+    # Смещение по широте (1 метр в радианах)
+    lat_offset = x / r_earth
+    # Смещение по долготе (1 метр в радианах с учетом косинуса широты)
+    lon_offset = y / (r_earth * math.cos(math.radians(ORIGIN_LAT)))
+
+    # Переводим радианы смещения в градусы и прибавляем к Origin
+    lat = ORIGIN_LAT + math.degrees(lat_offset)
+    lon = ORIGIN_LON + math.degrees(lon_offset)
+    alt = ORIGIN_ALT + z # Абсолютная высота над уровнем моря
+
+    return lat, lon, alt
+
 
 class TakeoffReq(BaseModel):
     alt: float
@@ -28,8 +58,12 @@ class DashWaypoint(BaseModel):
     y: float
     z: float
 
+# =================================================================
+# Убедитесь, что эта функция объявлена на глобальном уровне
+# =================================================================
 def reached(current_x: float, current_y: float, target_x: float, target_y: float, eps: float = 0.35) -> bool:
     return ((current_x - target_x) ** 2 + (current_y - target_y) ** 2) ** 0.5 < eps
+
 
 log = logging.getLogger("blimp_dashboard")
 
@@ -143,19 +177,19 @@ def create_app(udp_port: int, anchors_path: Path) -> FastAPI:
         app.state.udp_transport = transport
         log.info("listening for nlink-dump datagrams on UDP :%d", udp_port)
 
-        # --- [ИСПРАВЛЕНО] Старт связи с Дирижаблем/SITL ---
-        app.state.mavlink = None  # Изначально автопилот не подключен
+        # --- [ИСПРАВЛЕНО] Подключение к реальному дирижаблю через пульт TX12 по Wi-Fi ---
+        app.state.mavlink = None
 
         def init_mavlink():
             try:
-                # Используем порт 14551 (свободный выход симулятора)
-                app.state.mavlink = MAVLinkBackend('udpin:127.0.0.1:14551')
-                log.info("MAVLink Backend успешно запущен!")
+                # ВАЖНО: 'udpin:0.0.0.0:14550' заставляет Raspberry Pi слушать входящую
+                # MAVLink-телеметрию от Wi-Fi модуля ELRS Backpack вашего пульта на порту 14550!
+                app.state.mavlink = MAVLinkBackend('udpin:0.0.0.0:14550')
+                log.info("MAVLink успешно подключен к реальному дирижаблю по Wi-Fi!")
             except Exception as e:
-                log.error(f"Не удалось запустить MAVLink: {e}")
+                log.error(f"Не удалось подключиться к дирижаблю: {e}")
 
         threading.Thread(target=init_mavlink, daemon=True).start()
-
         asyncio.create_task(sitl_telemetry_broadcaster(app, relay))
 
     @app.on_event("shutdown")
@@ -206,51 +240,42 @@ def create_app(udp_port: int, anchors_path: Path) -> FastAPI:
         return {"status": "success", "message": f"Взлет на {req.alt}м!"}
 
     # =================================================================
-    # [НОВОЕ] Обработка кликнутого маршрута из вашего нового дашборда
+    # [ИСПРАВЛЕНО] Загрузка миссии целиком в память дирижабля по MAVLink!
     # =================================================================
+
     @app.post("/upload_route")
     async def upload_route(waypoints: List[DashWaypoint]) -> dict:
-        log.info(f"\n[МИССИЯ] Старт умного полета! Количество точек: {len(waypoints)}")
+        log.info(f"\n[МИССИЯ] Получен маршрут с сайта! Точек: {len(waypoints)}")
         mav = getattr(app.state, "mavlink", None)
         if not mav:
-            raise HTTPException(status_code=503, detail="Автопилот не подключен!")
+            raise HTTPException(status_code=503, detail="Дирижабль не подключен!")
 
-        target_z_ned = -1.2  # Летим на высоте 1.2 метра
+        if len(waypoints) == 0:
+            return {"status": "error", "message": "Пустой маршрут"}
 
-        async def fly_smart_mission():
-            for i, target in enumerate(waypoints):
-                log.info(f"[МИССИЯ] Летим к точке {i + 1}: X={target.x:.2f}, Y={target.y:.2f}")
+        # 1. Принудительно задаем автопилоту его Origin на карте мира (чтобы инициализировать Home)
+        mav.set_gps_origin(ORIGIN_LAT, ORIGIN_LON, ORIGIN_ALT)
+        await asyncio.sleep(0.5)
 
-                # Отправляем команду автопилоту
-                mav.send_setpoint(target.x, target.y, target_z_ned)
+        # 2. Конвертируем все локальные X, Y, Z (в метрах) в глобальные GPS (lat, lon, alt)
+        gps_waypoints = []
+        for wp in waypoints:
+            # Целевую высоту ставим 1.2 метра над уровнем пола
+            lat, lon, alt = local_to_global_gps(wp.x, wp.y, 1.2)
+            gps_waypoints.append((lat, lon, alt))
 
-                # Цикл проверки достижения точки
-                while True:
-                    await asyncio.sleep(0.3)  # Проверяем часто (3 раза в секунду)
+        log.info(f"[МИССИЯ] Сконвертировано {len(gps_waypoints)} точек в GPS-формат.")
 
-                    # Получаем текущие координаты из UWB
-                    # (Мы можем брать их из вашей глобальной переменной telemetry в main.py,
-                    # но для универсальности сделаем адаптивный выбор: UWB или SITL)
-                    current_x = 0.0
-                    current_y = 0.0
+        # 3. Вызываем нативную функцию upload_mission от команды SWP!
+        # Она очистит старый маршрут и запишет новый в память автопилота по радиоканалу!
+        success = mav.upload_mission(gps_waypoints)
 
-                    # Если есть живой симулятор, берем его координаты для теста
-                    if mav.telemetry:
-                        loc = mav.telemetry.get("local_position", {})
-                        current_x = loc.get("x", 0.0)
-                        current_y = loc.get("y", 0.0)
-
-                    # Считаем расстояние до цели
-                    if reached(current_x, current_y, target.x, target.y, eps=0.35):
-                        log.info(f"[МИССИЯ] Точка {i + 1} достигнута! Зависаем на 3 секунды...")
-                        await asyncio.sleep(3.0)  # Зависание на 3 секунды перед следующей точкой
-                        break
-
-            log.info("[МИССИЯ] Маршрут полностью выполнен!")
-
-        # Запускаем полет в фоновой задаче FastAPI, чтобы не вешать браузер
-        asyncio.create_task(fly_smart_mission())
-        return {"status": "success", "message": "Умная миссия запущена"}
+        if success:
+            log.info("[МИССИЯ] Маршрут успешно передан на борт!\n")
+            return {"status": "success", "message": "Миссия успешно загружена на дирижабль!"}
+        else:
+            log.error("[МИССИЯ] ОШИБКА: Не удалось загрузить миссию в автопилот!")
+            raise HTTPException(status_code=500, detail="Ошибка загрузки миссии в автопилот")
     # =================================================================
 
     @app.websocket("/ws")

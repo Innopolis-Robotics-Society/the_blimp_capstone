@@ -32,35 +32,40 @@ class MAVLinkBackend:
         thread.start()
 
     def _telemetry_loop(self):
-        # Переменные времени для периодических запросов
         last_heartbeat = 0
         last_stream_req = 0
+        last_origin_sent = 0 # <-- Переменная для таймера Origin
 
         while self.running:
             now = time.time()
 
-            # 1. Шлем HEARTBEAT раз в секунду, чтобы SITL знал, что мы - активная GCS
+            # 1. Шлем HEARTBEAT раз в секунду
             if now - last_heartbeat >= 1.0:
                 self.send_heartbeat()
                 last_heartbeat = now
 
-            # 2. Каждые 5 секунд принудительно требуем у SITL начать слать координаты
+            # 2. Каждые 5 секунд требуем координаты
             if now - last_stream_req >= 5.0:
                 try:
-                    # MAV_DATA_STREAM_ALL запрашивает все основные потоки (включая позицию)
                     self.master.mav.request_data_stream_send(
                         self.master.target_system,
                         self.master.target_component,
                         mavutil.mavlink.MAV_DATA_STREAM_ALL,
-                        10,  # Частота отправки координат (10 кадров в секунду)
-                        1    # 1 = начать отправку, 0 = остановить
+                        10, 1
                     )
-                    # logger.info("Requested data stream from SITL")
                 except Exception as e:
-                    logger.error(f"Failed to request data stream: {e}")
+                    logger.error(f"Failed to request data: {e}")
                 last_stream_req = now
 
-            # 3. Слушаем входящие сообщения
+            # 3. [НОВОЕ] Каждые 3 секунды шлем фейковый GPS-Origin для инициализации Home
+            if now - last_origin_sent >= 3.0:
+                try:
+                    self.set_gps_origin()
+                    last_origin_sent = now
+                except Exception as e:
+                    logger.error(f"Failed to send GPS origin: {e}")
+
+            # 4. Слушаем входящие сообщения
             msg = self.master.recv_match(blocking=True, timeout=0.1)
             if msg:
                 self._process_message(msg)
@@ -165,6 +170,21 @@ class MAVLinkBackend:
         )
         logger.info(f"Command sent: Change mode to {mode_name}")
         return True
+
+    def set_gps_origin(self, lat=55.7522, lon=48.7446, alt=120.0):
+        """
+        Отправляет фейковые GPS-координаты (по умолчанию Университет Иннополис)
+        для инициализации домашней точки (Home Position) в EKF3.
+        """
+        # Широта и долгота переводятся в int32 (градусы * 1e7)
+        # Высота переводится в миллиметры (метры * 1000)
+        self.master.mav.set_gps_global_origin_send(
+            self.master.target_system,
+            int(lat * 1e7),
+            int(lon * 1e7),
+            int(alt * 1000)
+        )
+        logger.info(f"Sent GPS origin (Home) to ArduPilot: lat={lat}, lon={lon}, alt={alt}")
 
     def arm(self):
         # Отправляем команду MAV_CMD_COMPONENT_ARM_DISARM
