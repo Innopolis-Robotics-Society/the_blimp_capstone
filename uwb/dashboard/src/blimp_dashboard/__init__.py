@@ -1,3 +1,3 @@
-"""3D web dashboard for the blimp UWB positioning network."""
+"""Single-tag UWB dashboard and real MAVLink ground station."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

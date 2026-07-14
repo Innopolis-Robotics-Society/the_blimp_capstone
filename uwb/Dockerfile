@@ -1,5 +1,6 @@
 # Builds both packages: nlink_py (native NLink parser + nlink-dump)
-# and blimp-dashboard (FastAPI + three.js frontend).
+# and the single-tag FastAPI ground station for a real MAVLink autopilot.
+# There is no SITL process or 3D simulator in this image.
 # Build context must be uwb/ (needs the extern/ submodules checked out).
 FROM python:3.11-slim AS builder
 

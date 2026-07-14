@@ -1,692 +1,1062 @@
-// 3D visualization of the LinkTrack UWB network: anchors, tags, blimp axis.
-// Coordinates are UWB hall frame (Z up); the three.js camera is set Z-up too.
-import * as THREE from 'three';
-import { OrbitControls } from './OrbitControls.js';
+(function () {
+  'use strict';
 
-const TAG_COLORS = { 1: 0x2bd96f, 2: 0xff9f43 }; // 1 = нос, 2 = корма
-const TRAIL_LEN = 500;
+  var TRAIL_LIMIT = 700;
+  var UWB_STALE_MS = 2500;
 
-// Переменные для записи логов экспериментов (User Story 7)
-let isRecording = false;
-let recordStartTime = 0;
-let recordedData = []; // Сюда будем собирать кадры
+  function byId(id) {
+    return document.getElementById(id);
+  }
 
-// ---------------------------------------------------------------- scene
-const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+  var ui = {
+    wsDot: byId('ws-dot'),
+    wsState: byId('ws-state'),
+    uwbDot: byId('uwb-dot'),
+    uwbState: byId('uwb-state'),
+    mavDot: byId('mav-dot'),
+    mavState: byId('mav-state'),
+    alert: byId('alert'),
+    configuredTag: byId('configured-tag'),
+    activeTag: byId('active-tag'),
+    tagX: byId('tag-x'),
+    tagY: byId('tag-y'),
+    tagZ: byId('tag-z'),
+    uwbRate: byId('uwb-rate'),
+    uwbVoltage: byId('uwb-voltage'),
+    uwbAge: byId('uwb-age'),
+    showTrail: byId('show-trail'),
+    showRanges: byId('show-ranges'),
+    ema: byId('ema'),
+    emaValue: byId('ema-value'),
+    clearTrail: byId('clear-trail'),
+    anchorsBody: document.querySelector('#anchors-table tbody'),
+    reloadAnchors: byId('reload-anchors'),
+    saveAnchors: byId('save-anchors'),
+    anchorStatus: byId('anchor-status'),
+    map: byId('map'),
+    arm: byId('arm'),
+    disarm: byId('disarm'),
+    flightMode: byId('flight-mode'),
+    setMode: byId('set-mode'),
+    commandStatus: byId('command-status'),
+    waypointX: byId('wp-x'),
+    waypointY: byId('wp-y'),
+    waypointZ: byId('wp-z'),
+    addWaypoint: byId('add-waypoint'),
+    waypointList: byId('waypoint-list'),
+    routeStats: byId('route-stats'),
+    clearWaypoints: byId('clear-waypoints'),
+    uploadMission: byId('upload-mission'),
+    startMission: byId('start-mission'),
+    missionStatus: byId('mission-status'),
+    recordNote: byId('record-note'),
+    record: byId('record'),
+    recordStatus: byId('record-status')
+  };
 
-const scene = new THREE.Scene();
-// Оставляем темный цвет как заглушку, пока грузится картинка
-scene.background = new THREE.Color(0x0b0e14);
-// Создаем загрузчик текстур
-const textureLoader = new THREE.TextureLoader();
+  var state = {
+    ws: null,
+    wsConnected: false,
+    wsOpenedAt: 0,
+    reconnectTimer: null,
+    configuredTagId: null,
+    activeTagId: null,
+    rawPosition: null,
+    position: null,
+    distances: [],
+    trail: [],
+    lastUwbAt: 0,
+    windowFrames: 0,
+    voltage: null,
+    anchors: [],
+    waypoints: [],
+    mapView: null,
+    mavConnected: false,
+    mavStatusKnown: false,
+    mavStatusPollBusy: false,
+    commandBusy: false,
+    missionUploaded: false,
+    routeRevision: 0,
+    recording: false,
+    recordStartedAt: 0,
+    recordRows: []
+  };
 
-textureLoader.load('./static/sky.jpg', function(texture) {
-    texture.colorSpace = THREE.SRGBColorSpace;
+  function finiteNumber(value) {
+    var number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
 
-    // 1. Создаем огромную сферу (радиус 150 метров)
-    const skyGeo = new THREE.SphereGeometry(150, 32, 32);
+  function validPosition(pos) {
+    return Array.isArray(pos) && pos.length >= 3 &&
+      finiteNumber(pos[0]) !== null &&
+      finiteNumber(pos[1]) !== null &&
+      finiteNumber(pos[2]) !== null;
+  }
 
-    // 2. Создаем материал
-    const skyMat = new THREE.MeshBasicMaterial({
-        map: texture,
-        side: THREE.BackSide, // ВАЖНО: Рисуем текстуру ВНУТРИ сферы, а не снаружи!
-        depthWrite: false     // Чтобы небо всегда было на заднем плане
+  function setPanelStatus(element, message, kind) {
+    element.textContent = message;
+    element.classList.remove('good', 'bad', 'warning');
+    if (kind) {
+      element.classList.add(kind);
+    }
+  }
+
+  function detailText(value) {
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(detailText).join('; ');
+    }
+    if (value && typeof value === 'object') {
+      if (typeof value.msg === 'string') {
+        return value.msg;
+      }
+      try {
+        return JSON.stringify(value);
+      } catch (error) {
+        return 'Неизвестная ошибка';
+      }
+    }
+    return '';
+  }
+
+  function responseMessage(data, fallback) {
+    if (!data || typeof data !== 'object') {
+      return fallback;
+    }
+    return detailText(data.message) || detailText(data.detail) || fallback;
+  }
+
+  async function apiRequest(path, options) {
+    var response = await fetch(path, options || {});
+    var text = await response.text();
+    var data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (error) {
+        data = { detail: text };
+      }
+    }
+    if (!response.ok) {
+      var requestError = new Error(responseMessage(data, 'HTTP ' + response.status));
+      requestError.status = response.status;
+      requestError.data = data;
+      throw requestError;
+    }
+    return data;
+  }
+
+  function jsonPost(path, body) {
+    var options = {
+      method: 'POST',
+      headers: { 'X-Blimp-Control': 'dashboard' }
+    };
+    if (body !== undefined) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+    return apiRequest(path, options);
+  }
+
+  function resetTrackedTag() {
+    state.rawPosition = null;
+    state.position = null;
+    state.distances = [];
+    state.trail = [];
+    state.lastUwbAt = 0;
+    state.windowFrames = 0;
+    state.voltage = null;
+    ui.activeTag.textContent = state.activeTagId === null ? 'ожидание' : 'T' + state.activeTagId;
+    ui.tagX.textContent = '—';
+    ui.tagY.textContent = '—';
+    ui.tagZ.textContent = '—';
+    ui.uwbVoltage.textContent = '— В';
+    drawMap();
+  }
+
+  async function loadDashboardConfig() {
+    try {
+      var data = await apiRequest('/api/config', { cache: 'no-store' });
+      var id = Number(data.uwb_tag_id);
+      if (!Number.isInteger(id) || id < 0 || id > 255) {
+        throw new Error('сервер не вернул допустимый uwb_tag_id');
+      }
+      state.configuredTagId = id;
+      state.activeTagId = id;
+      ui.configuredTag.textContent = 'T' + id;
+      if (data.mission_limits && typeof data.mission_limits === 'object') {
+        var minAltitude = finiteNumber(data.mission_limits.min_altitude);
+        var maxAltitude = finiteNumber(data.mission_limits.max_altitude);
+        if (minAltitude !== null) {
+          ui.waypointZ.min = String(minAltitude);
+        }
+        if (maxAltitude !== null) {
+          ui.waypointZ.max = String(maxAltitude);
+        }
+      }
+      resetTrackedTag();
+    } catch (error) {
+      state.configuredTagId = null;
+      state.activeTagId = null;
+      ui.configuredTag.textContent = 'первая метка';
+      ui.configuredTag.title = 'Config API недоступен: ' + error.message;
+    }
+    updateRealtimeStatus();
+  }
+
+  function candidatesFromFrame(frame) {
+    if (!frame || typeof frame !== 'object') {
+      return [];
+    }
+    if (frame.frame_type === 'anchorframe0') {
+      return Array.isArray(frame.nodes)
+        ? frame.nodes.filter(function (node) {
+          return node && Number(node.role) === 2 && validPosition(node.pos_3d);
+        })
+        : [];
+    }
+    if (frame.frame_type === 'tagframe0' && Number(frame.role) === 2 && validPosition(frame.pos_3d)) {
+      return [frame];
+    }
+    return [];
+  }
+
+  function handleUwbFrame(frame) {
+    if (!frame) {
+      return;
+    }
+
+    var candidates = candidatesFromFrame(frame);
+    if (!candidates.length) {
+      return;
+    }
+
+    if (state.activeTagId === null) {
+      candidates.sort(function (left, right) {
+        return Number(left.id) - Number(right.id);
+      });
+      state.activeTagId = Number(candidates[0].id);
+    }
+
+    var node = candidates.find(function (candidate) {
+      return Number(candidate.id) === state.activeTagId;
+    });
+    if (!node) {
+      return;
+    }
+
+    var raw = {
+      x: Number(node.pos_3d[0]),
+      y: Number(node.pos_3d[1]),
+      z: Number(node.pos_3d[2])
+    };
+    var alpha = Number(ui.ema.value);
+
+    state.rawPosition = raw;
+    if (state.position) {
+      state.position = {
+        x: state.position.x + alpha * (raw.x - state.position.x),
+        y: state.position.y + alpha * (raw.y - state.position.y),
+        z: state.position.z + alpha * (raw.z - state.position.z)
+      };
+    } else {
+      state.position = { x: raw.x, y: raw.y, z: raw.z };
+    }
+
+    state.distances = Array.isArray(node.dis_arr) ? node.dis_arr.slice() : [];
+    state.lastUwbAt = Date.now();
+    state.windowFrames += 1;
+
+    var voltage = finiteNumber(frame.voltage);
+    if (voltage !== null) {
+      state.voltage = voltage;
+    }
+
+    state.trail.push({ x: state.position.x, y: state.position.y });
+    if (state.trail.length > TRAIL_LIMIT) {
+      state.trail.splice(0, state.trail.length - TRAIL_LIMIT);
+    }
+
+    if (state.recording) {
+      state.recordRows.push([
+        ((Date.now() - state.recordStartedAt) / 1000).toFixed(3),
+        state.activeTagId,
+        raw.x.toFixed(4),
+        raw.y.toFixed(4),
+        raw.z.toFixed(4),
+        state.voltage === null ? '' : state.voltage.toFixed(3)
+      ]);
+      setPanelStatus(ui.recordStatus, 'Записано пакетов: ' + state.recordRows.length, 'good');
+    }
+
+    updateTagReadout();
+    drawMap();
+  }
+
+  function updateTagReadout() {
+    ui.activeTag.textContent = state.activeTagId === null ? 'ожидание' : 'T' + state.activeTagId;
+    if (!state.position) {
+      return;
+    }
+    ui.tagX.textContent = state.position.x.toFixed(2);
+    ui.tagY.textContent = state.position.y.toFixed(2);
+    ui.tagZ.textContent = state.position.z.toFixed(2);
+    ui.uwbVoltage.textContent = state.voltage === null ? '— В' : state.voltage.toFixed(2) + ' В';
+  }
+
+  function setAlert(message) {
+    ui.alert.textContent = message || '';
+    ui.alert.classList.toggle('visible', Boolean(message));
+  }
+
+  function updateRealtimeStatus() {
+    var now = Date.now();
+    var age = state.lastUwbAt ? now - state.lastUwbAt : Infinity;
+    var fresh = age < UWB_STALE_MS;
+    var rate = state.windowFrames * 2;
+    state.windowFrames = 0;
+
+    ui.uwbRate.textContent = rate.toFixed(0) + ' Гц';
+    ui.uwbAge.textContent = Number.isFinite(age) ? (age / 1000).toFixed(1) + ' с назад' : '—';
+    ui.uwbDot.classList.toggle('ok', fresh);
+
+    if (fresh) {
+      ui.uwbState.textContent = 'UWB: T' + state.activeTagId;
+    } else if (state.activeTagId !== null) {
+      ui.uwbState.textContent = 'UWB: нет T' + state.activeTagId;
+    } else {
+      ui.uwbState.textContent = 'UWB: ожидание метки';
+    }
+
+    if (!state.wsConnected) {
+      setAlert('Нет соединения с потоком данных дашборда.');
+    } else if (now - state.wsOpenedAt > UWB_STALE_MS && !fresh) {
+      var target = state.activeTagId === null ? 'выбранной метки' : 'метки T' + state.activeTagId;
+      setAlert('Нет свежих UWB-данных от ' + target + '.');
+    } else {
+      setAlert('');
+    }
+  }
+
+  function renderAnchors() {
+    ui.anchorsBody.innerHTML = '';
+    state.anchors.forEach(function (anchor) {
+      var row = document.createElement('tr');
+      var idCell = document.createElement('td');
+      idCell.textContent = 'A' + anchor.id;
+      row.appendChild(idCell);
+
+      [0, 1, 2].forEach(function (axis) {
+        var cell = document.createElement('td');
+        var input = document.createElement('input');
+        input.type = 'number';
+        input.step = '0.1';
+        input.value = String(anchor.pos[axis]);
+        input.dataset.anchorId = String(anchor.id);
+        input.dataset.axis = String(axis);
+        cell.appendChild(input);
+        row.appendChild(cell);
+      });
+      ui.anchorsBody.appendChild(row);
+    });
+    drawMap();
+  }
+
+  async function loadAnchors() {
+    setPanelStatus(ui.anchorStatus, 'Загрузка координат якорей…', null);
+    try {
+      var data = await apiRequest('/api/anchors', { cache: 'no-store' });
+      if (!data || !Array.isArray(data.anchors)) {
+        throw new Error('Сервер вернул неверный формат anchors');
+      }
+      state.anchors = data.anchors.map(function (anchor) {
+        return {
+          id: Number(anchor.id),
+          pos: [Number(anchor.pos[0]), Number(anchor.pos[1]), Number(anchor.pos[2])]
+        };
+      });
+      renderAnchors();
+      setPanelStatus(ui.anchorStatus, 'Загружено якорей: ' + state.anchors.length + '.', 'good');
+    } catch (error) {
+      setPanelStatus(ui.anchorStatus, 'Не удалось загрузить якоря: ' + error.message, 'bad');
+    }
+  }
+
+  async function saveAnchors() {
+    var next = state.anchors.map(function (anchor) {
+      return { id: anchor.id, pos: anchor.pos.slice() };
+    });
+    var inputs = ui.anchorsBody.querySelectorAll('input[data-anchor-id]');
+
+    for (var index = 0; index < inputs.length; index += 1) {
+      var input = inputs[index];
+      var anchorId = Number(input.dataset.anchorId);
+      var axis = Number(input.dataset.axis);
+      var value = finiteNumber(input.value);
+      if (value === null) {
+        setPanelStatus(ui.anchorStatus, 'Все координаты якорей должны быть числами.', 'bad');
+        return;
+      }
+      var target = next.find(function (anchor) {
+        return anchor.id === anchorId;
+      });
+      if (target) {
+        target.pos[axis] = value;
+      }
+    }
+
+    ui.saveAnchors.disabled = true;
+    setPanelStatus(ui.anchorStatus, 'Сохранение…', null);
+    try {
+      var data = await apiRequest('/api/anchors', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ anchors: next })
+      });
+      state.anchors = data.anchors;
+      renderAnchors();
+      setPanelStatus(ui.anchorStatus, 'Координаты якорей сохранены.', 'good');
+    } catch (error) {
+      setPanelStatus(ui.anchorStatus, 'Ошибка сохранения: ' + error.message, 'bad');
+    } finally {
+      ui.saveAnchors.disabled = false;
+    }
+  }
+
+  function niceGridStep(span) {
+    var raw = span / 8;
+    var magnitude = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 0.001))));
+    var normalized = raw / magnitude;
+    if (normalized <= 1) {
+      return magnitude;
+    }
+    if (normalized <= 2) {
+      return 2 * magnitude;
+    }
+    if (normalized <= 5) {
+      return 5 * magnitude;
+    }
+    return 10 * magnitude;
+  }
+
+  function resizeMapCanvas() {
+    var rect = ui.map.getBoundingClientRect();
+    var ratio = Math.min(window.devicePixelRatio || 1, 2);
+    var pixelWidth = Math.max(1, Math.round(rect.width * ratio));
+    var pixelHeight = Math.max(1, Math.round(rect.height * ratio));
+    if (ui.map.width !== pixelWidth || ui.map.height !== pixelHeight) {
+      ui.map.width = pixelWidth;
+      ui.map.height = pixelHeight;
+    }
+    return { width: rect.width, height: rect.height, ratio: ratio };
+  }
+
+  function mapBounds() {
+    var points = [];
+    state.anchors.forEach(function (anchor) {
+      points.push({ x: Number(anchor.pos[0]), y: Number(anchor.pos[1]) });
+    });
+    state.waypoints.forEach(function (waypoint) {
+      points.push({ x: waypoint.x, y: waypoint.y });
+    });
+    if (state.position) {
+      points.push({ x: state.position.x, y: state.position.y });
+    }
+    if (ui.showTrail.checked) {
+      points = points.concat(state.trail);
+    }
+    if (!points.length) {
+      points = [{ x: 0, y: 0 }, { x: 4, y: 4 }];
+    }
+
+    var minX = Math.min.apply(null, points.map(function (point) { return point.x; }));
+    var maxX = Math.max.apply(null, points.map(function (point) { return point.x; }));
+    var minY = Math.min.apply(null, points.map(function (point) { return point.y; }));
+    var maxY = Math.max.apply(null, points.map(function (point) { return point.y; }));
+    var centerX = (minX + maxX) / 2;
+    var centerY = (minY + maxY) / 2;
+    var spanX = Math.max(maxX - minX + 1.5, 4);
+    var spanY = Math.max(maxY - minY + 1.5, 4);
+
+    return {
+      centerX: centerX,
+      centerY: centerY,
+      spanX: spanX,
+      spanY: spanY
+    };
+  }
+
+  function drawMap() {
+    if (!ui.map) {
+      return;
+    }
+    var size = resizeMapCanvas();
+    var context = ui.map.getContext('2d');
+    context.setTransform(size.ratio, 0, 0, size.ratio, 0, 0);
+    context.clearRect(0, 0, size.width, size.height);
+    context.fillStyle = '#0a101a';
+    context.fillRect(0, 0, size.width, size.height);
+
+    var bounds = mapBounds();
+    var padding = 42;
+    var scale = Math.min(
+      (size.width - padding * 2) / bounds.spanY,
+      (size.height - padding * 2) / bounds.spanX
+    );
+    scale = Math.max(scale, 1);
+
+    state.mapView = {
+      width: size.width,
+      height: size.height,
+      scale: scale,
+      centerX: bounds.centerX,
+      centerY: bounds.centerY
+    };
+
+    function project(point) {
+      return {
+        x: size.width / 2 + (point.y - bounds.centerY) * scale,
+        y: size.height / 2 - (point.x - bounds.centerX) * scale
+      };
+    }
+
+    var visibleSpan = Math.max(bounds.spanX, bounds.spanY);
+    var gridStep = niceGridStep(visibleSpan);
+    var minGridX = bounds.centerX - bounds.spanX / 2;
+    var maxGridX = bounds.centerX + bounds.spanX / 2;
+    var minGridY = bounds.centerY - bounds.spanY / 2;
+    var maxGridY = bounds.centerY + bounds.spanY / 2;
+
+    context.lineWidth = 1;
+    context.strokeStyle = '#1c293b';
+    context.fillStyle = '#64728a';
+    context.font = '10px system-ui, sans-serif';
+
+    for (var gridY = Math.ceil(minGridY / gridStep) * gridStep; gridY <= maxGridY; gridY += gridStep) {
+      var vertical = project({ x: bounds.centerX, y: gridY });
+      context.beginPath();
+      context.moveTo(vertical.x, 0);
+      context.lineTo(vertical.x, size.height);
+      context.stroke();
+      context.fillText('Y ' + gridY.toFixed(1), vertical.x + 3, size.height - 8);
+    }
+    for (var gridX = Math.ceil(minGridX / gridStep) * gridStep; gridX <= maxGridX; gridX += gridStep) {
+      var horizontal = project({ x: gridX, y: bounds.centerY });
+      context.beginPath();
+      context.moveTo(0, horizontal.y);
+      context.lineTo(size.width, horizontal.y);
+      context.stroke();
+      context.fillText('X ' + gridX.toFixed(1), 5, horizontal.y - 4);
+    }
+
+    if (ui.showRanges.checked && state.position) {
+      var tagOnMap = project(state.position);
+      state.anchors.forEach(function (anchor) {
+        var distance = finiteNumber(state.distances[anchor.id]);
+        if (distance === null || distance <= 0) {
+          return;
+        }
+        var anchorOnMap = project({ x: anchor.pos[0], y: anchor.pos[1] });
+        context.save();
+        context.setLineDash([5, 5]);
+        context.strokeStyle = '#53617a';
+        context.beginPath();
+        context.moveTo(tagOnMap.x, tagOnMap.y);
+        context.lineTo(anchorOnMap.x, anchorOnMap.y);
+        context.stroke();
+        context.restore();
+        context.fillStyle = '#9aa7bd';
+        context.fillText(
+          distance.toFixed(2) + ' м',
+          (tagOnMap.x + anchorOnMap.x) / 2 + 4,
+          (tagOnMap.y + anchorOnMap.y) / 2 - 4
+        );
+      });
+    }
+
+    if (ui.showTrail.checked && state.trail.length > 1) {
+      context.strokeStyle = 'rgba(55,220,122,.55)';
+      context.lineWidth = 2;
+      context.beginPath();
+      state.trail.forEach(function (point, index) {
+        var projected = project(point);
+        if (index === 0) {
+          context.moveTo(projected.x, projected.y);
+        } else {
+          context.lineTo(projected.x, projected.y);
+        }
+      });
+      context.stroke();
+    }
+
+    if (state.waypoints.length) {
+      context.strokeStyle = '#ffbd45';
+      context.lineWidth = 2;
+      context.beginPath();
+      state.waypoints.forEach(function (waypoint, index) {
+        var projected = project(waypoint);
+        if (index === 0) {
+          context.moveTo(projected.x, projected.y);
+        } else {
+          context.lineTo(projected.x, projected.y);
+        }
+      });
+      context.stroke();
+
+      state.waypoints.forEach(function (waypoint, index) {
+        var projected = project(waypoint);
+        context.fillStyle = '#ffbd45';
+        context.beginPath();
+        context.arc(projected.x, projected.y, 6, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = '#ffe2a3';
+        context.fillText('P' + (index + 1), projected.x + 8, projected.y - 7);
+      });
+    }
+
+    state.anchors.forEach(function (anchor) {
+      var projected = project({ x: anchor.pos[0], y: anchor.pos[1] });
+      context.fillStyle = '#54a7ff';
+      context.fillRect(projected.x - 6, projected.y - 6, 12, 12);
+      context.fillStyle = '#a8d3ff';
+      context.fillText('A' + anchor.id, projected.x + 9, projected.y - 8);
     });
 
-    const sky = new THREE.Mesh(skyGeo, skyMat);
-
-    // 3. Поворачиваем саму сферу на 90 градусов (компенсируем ваш Z-up)
-    sky.rotation.x = Math.PI / 2;
-
-    sky.scale.x = -1
-
-    // Добавляем небо на сцену
-    scene.add(sky);
-});
-
-const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 200);
-camera.up.set(0, 0, 1);
-camera.position.set(7, -6, 5);
-
-const controls = new OrbitControls(camera, canvas);
-controls.target.set(2, 2, 0);
-controls.enableDamping = true;
-controls.maxDistance = 30;
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-sun.position.set(5, -8, 12);
-scene.add(sun);
-
-const grid = new THREE.GridHelper(30, 30, 0x33415c, 0x1c2333);
-grid.rotation.x = Math.PI / 2;
-scene.add(grid);
-
-// ----- floor -----
-const floorTexture = new THREE.TextureLoader().load("./static/floor.png");
-floorTexture.colorSpace = THREE.SRGBColorSpace;
-
-const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(30, 30),
-    new THREE.MeshBasicMaterial({
-        map: floorTexture,
-        transparent: true
-    })
-);
-
-floor.position.set(0, 0, -0.01);
-scene.add(floor);
-// ------------------
-
-scene.add(new THREE.AxesHelper(1.2));
-
-function resize() {
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-}
-window.addEventListener('resize', resize);
-resize();
-
-function makeLabel(text, color = '#e8eefc', scale = 0.5) {
-  const cv = document.createElement('canvas');
-  cv.width = 256; cv.height = 96;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: new THREE.CanvasTexture(cv), depthTest: false, transparent: true,
-  }));
-  sprite.scale.set(scale * 2.6, scale, 1);
-  sprite.userData.draw = (t) => {
-    const ctx = cv.getContext('2d');
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    ctx.font = 'bold 44px system-ui, sans-serif';
-    ctx.fillStyle = color;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(t, cv.width / 2, cv.height / 2);
-    sprite.material.map.needsUpdate = true;
-  };
-  sprite.userData.draw(text);
-  return sprite;
-}
-
-// ---------------------------------------------------------------- anchors
-let anchorsCfg = [];               // [{id, pos:[x,y,z]}]
-const anchorsGroup = new THREE.Group();
-scene.add(anchorsGroup);
-
-function rebuildAnchors() {
-  anchorsGroup.clear();
-  for (const a of anchorsCfg) {
-    const cube = new THREE.Mesh(
-      new THREE.BoxGeometry(0.16, 0.16, 0.16),
-      new THREE.MeshStandardMaterial({ color: 0x4ea1ff }));
-    cube.position.set(...a.pos);
-    const label = makeLabel(`A${a.id}`, '#4ea1ff');
-    label.position.set(a.pos[0], a.pos[1], a.pos[2] + 0.28);
-    anchorsGroup.add(cube, label);
-  }
-  const c = anchorsCfg.reduce((s, a) => s.add(new THREE.Vector3(...a.pos)),
-                              new THREE.Vector3());
-  if (anchorsCfg.length) controls.target.copy(c.divideScalar(anchorsCfg.length));
-}
-
-function renderAnchorEditor() {
-  const tbl = document.getElementById('anchors-tbl');
-  tbl.innerHTML = '<tr><td></td><td>x</td><td>y</td><td>z</td></tr>';
-  for (const a of anchorsCfg) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>A${a.id}</td>` + [0, 1, 2].map(i =>
-      `<td><input type="number" step="0.1" value="${a.pos[i]}"
-           data-id="${a.id}" data-axis="${i}"></td>`).join('');
-    tbl.appendChild(tr);
-  }
-}
-
-async function loadAnchors() {
-  const resp = await fetch('/api/anchors');
-  anchorsCfg = (await resp.json()).anchors;
-  rebuildAnchors();
-  renderAnchorEditor();
-}
-
-document.getElementById('btn-save').addEventListener('click', async () => {
-  for (const inp of document.querySelectorAll('#anchors-tbl input')) {
-    const a = anchorsCfg.find(x => x.id === Number(inp.dataset.id));
-    a.pos[Number(inp.dataset.axis)] = Number(inp.value) || 0;
-  }
-  const resp = await fetch('/api/anchors', {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ anchors: anchorsCfg }),
-  });
-  document.getElementById('save-status').textContent = resp.ok ? '✓' : '✗ ошибка';
-  setTimeout(() => document.getElementById('save-status').textContent = '', 2000);
-  rebuildAnchors();
-});
-
-// ---------------------------------------------------------------- tags
-const tags = new Map(); // id -> {mesh,label,trail,trailPts,trailIdx,pos,seen,total,lastDis}
-
-function makeTag(id) {
-  const color = TAG_COLORS[id] ?? 0x9aa7c1;
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.09, 24, 16),
-    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.35 }));
-  const label = makeLabel(`T${id}`, '#' + color.toString(16).padStart(6, '0'));
-  const trailGeo = new THREE.BufferGeometry();
-  trailGeo.setAttribute('position',
-    new THREE.BufferAttribute(new Float32Array(TRAIL_LEN * 3), 3));
-  trailGeo.setDrawRange(0, 0);
-  const trail = new THREE.Line(trailGeo,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 }));
-  trail.frustumCulled = false;
-  scene.add(mesh, label, trail);
-  const tag = { mesh, label, trail, trailPts: 0, trailIdx: 0,
-                pos: null, seen: 0, total: 0, lastDis: [] };
-  tags.set(id, tag);
-  return tag;
-}
-
-function pushTrail(tag, p) {
-  const attr = tag.trail.geometry.attributes.position;
-  attr.setXYZ(tag.trailIdx, p.x, p.y, p.z);
-  tag.trailIdx = (tag.trailIdx + 1) % TRAIL_LEN;
-  tag.trailPts = Math.min(tag.trailPts + 1, TRAIL_LEN);
-  // draw oldest..newest without a seam: simplest is full range once wrapped
-  tag.trail.geometry.setDrawRange(0, tag.trailPts);
-  attr.needsUpdate = true;
-}
-
-// blimp axis: ellipsoid + heading arrow between tag 1 (нос) and tag 2 (корма)
-const blimpBody = new THREE.Mesh(
-  new THREE.SphereGeometry(1, 24, 16),
-  new THREE.MeshStandardMaterial({ color: 0x8f6fff, transparent: true, opacity: 0.22 }));
-const blimpArrow = new THREE.ArrowHelper(
-  new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 0.7, 0x8f6fff, 0.22, 0.12);
-blimpBody.visible = blimpArrow.visible = false;
-scene.add(blimpBody, blimpArrow);
-
-// ==========================================================================
-// [НОВОЕ] Создаем синего "призрака" симулятора SITL
-const sitlBody = new THREE.Mesh(
-  new THREE.SphereGeometry(0.8, 24, 16), // Чуть меньше реального дирижабля
-  new THREE.MeshStandardMaterial({
-    color: 0x4ea1ff,
-    transparent: true,
-    opacity: 0.35,
-    wireframe: true // Делаем его красивой сеткой, как в фантастических фильмах!
-  })
-);
-sitlBody.visible = false; // Скрыт, пока симулятор не пришлет первый кадр
-scene.add(sitlBody);
-// ==========================================================================
-
-function updateBlimp() {
-  const nose = tags.get(1)?.pos, stern = tags.get(2)?.pos;
-  const ok = nose && stern;
-  blimpBody.visible = blimpArrow.visible = ok;
-  if (!ok) return;
-  const dir = new THREE.Vector3().subVectors(nose, stern);
-  const len = Math.max(dir.length(), 0.2);
-  const mid = new THREE.Vector3().addVectors(nose, stern).multiplyScalar(0.5);
-  blimpBody.position.copy(mid);
-  blimpBody.scale.set(len / 2 + 0.12, 0.25, 0.25);
-  blimpBody.setRotationFromQuaternion(new THREE.Quaternion()
-    .setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir.clone().normalize()));
-  blimpArrow.position.copy(nose);
-  blimpArrow.setDirection(dir.normalize());
-}
-
-// range lines tag -> anchor, with distance labels
-const rangesGroup = new THREE.Group();
-scene.add(rangesGroup);
-const rangeLines = new Map(); // "tag:anchor" -> {line, label}
-
-function updateRanges() {
-  const show = document.getElementById('opt-ranges').checked;
-  rangesGroup.visible = show;
-  if (!show) return;
-  const used = new Set();
-  for (const [tid, tag] of tags) {
-    if (!tag.pos) continue;
-    for (const a of anchorsCfg) {
-      const dis = tag.lastDis[a.id];
-      if (!dis) continue; // 0 = no ranging to this anchor
-      const key = `${tid}:${a.id}`;
-      used.add(key);
-      let rl = rangeLines.get(key);
-      if (!rl) {
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-        const line = new THREE.Line(geo, new THREE.LineDashedMaterial({
-          color: 0x5a6a8a, dashSize: 0.12, gapSize: 0.08,
-          transparent: true, opacity: 0.7 }));
-        line.frustumCulled = false;
-        const label = makeLabel('', '#7f8ca6', 0.28);
-        rangesGroup.add(line, label);
-        rl = { line, label, lastText: '' };
-        rangeLines.set(key, rl);
-      }
-      const ap = new THREE.Vector3(...a.pos);
-      const attr = rl.line.geometry.attributes.position;
-      attr.setXYZ(0, tag.pos.x, tag.pos.y, tag.pos.z);
-      attr.setXYZ(1, ap.x, ap.y, ap.z);
-      attr.needsUpdate = true;
-      rl.line.computeLineDistances();
-      rl.label.position.lerpVectors(tag.pos, ap, 0.5);
-      const text = dis.toFixed(2);
-      if (text !== rl.lastText) { rl.label.userData.draw(text); rl.lastText = text; }
-      rl.line.visible = rl.label.visible = true;
+    if (state.position) {
+      var current = project(state.position);
+      context.fillStyle = 'rgba(55,220,122,.18)';
+      context.beginPath();
+      context.arc(current.x, current.y, 15, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = '#37dc7a';
+      context.lineWidth = 3;
+      context.beginPath();
+      context.arc(current.x, current.y, 7, 0, Math.PI * 2);
+      context.stroke();
+      context.fillStyle = '#a7f5c8';
+      context.fillText('T' + state.activeTagId, current.x + 11, current.y - 10);
     }
   }
-  for (const [key, rl] of rangeLines) {
-    if (!used.has(key)) rl.line.visible = rl.label.visible = false;
-  }
-}
-// ---------------------------------------------------------------- waypoints (Миссии)
-let waypoints = []; // Массив точек миссии
-const waypointsGroup = new THREE.Group();
-scene.add(waypointsGroup);
 
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-
-// Добавляем точку ДВОЙНЫМ кликом по полу (floor)
-canvas.addEventListener('dblclick', (event) => {
-  const rect = canvas.getBoundingClientRect();
-  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-  raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObject(floor);
-
-  if (intersects.length > 0) {
-    const hit = intersects[0].point;
-    hit.z = 0; // Точка ставится строго на пол
-    waypoints.push(hit);
-    updateWaypointsVisuals(); // Перерисовываем
-  }
-});
-
-function updateWaypointsVisuals() {
-  waypointsGroup.clear(); // Очищаем 3D объекты маршрута
-  const listEl = document.getElementById('wp-list');
-  listEl.innerHTML = '';  // Очищаем HTML список на панели
-
-  // Задача 5: Обновление калькулятора параметров пути
-  updateRouteStats();
-
-  if (waypoints.length === 0) {
-      listEl.innerHTML = '<div style="color: #7f8ca6; font-size: 11px; text-align:center;">Двойной клик по карте<br>для установки точек</div>';
+  function addWaypoint(x, y, z) {
+    if (![x, y, z].every(Number.isFinite) || z < 0) {
+      setPanelStatus(ui.missionStatus, 'Координаты должны быть числами, Z не может быть отрицательным.', 'bad');
       return;
+    }
+    state.waypoints.push({ x: x, y: y, z: z });
+    state.routeRevision += 1;
+    state.missionUploaded = false;
+    renderWaypoints();
+    setPanelStatus(ui.missionStatus, 'Точка P' + state.waypoints.length + ' добавлена.', null);
   }
 
-  // 1. Рисуем 3D-линию.
-  const mat = new THREE.LineBasicMaterial({ color: 0xffaa00, linewidth: 2 });
-  const geo = new THREE.BufferGeometry().setFromPoints(waypoints);
-  const line = new THREE.Line(geo, mat);
-  waypointsGroup.add(line);
+  function addWaypointFromInputs() {
+    var x = finiteNumber(ui.waypointX.value);
+    var y = finiteNumber(ui.waypointY.value);
+    var z = finiteNumber(ui.waypointZ.value);
+    if (x === null || y === null || z === null) {
+      setPanelStatus(ui.missionStatus, 'Заполните X, Y и Z числовыми значениями.', 'bad');
+      return;
+    }
+    addWaypoint(x, y, z);
+  }
 
-  // 2. Рисуем 3D-сферы и добавляем HTML-ярлыки с крестиками
-  waypoints.forEach((wp, index) => {
-    // 3D Сфера
-    const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(0.1, 16, 16),
-      new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0xffaa00 })
+  function renderWaypoints() {
+    ui.waypointList.innerHTML = '';
+    if (!state.waypoints.length) {
+      var empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.style.padding = '10px 2px';
+      empty.textContent = 'Точек пока нет.';
+      ui.waypointList.appendChild(empty);
+      ui.routeStats.textContent = 'Маршрут пуст.';
+      drawMap();
+      updateControlAvailability();
+      return;
+    }
+
+    state.waypoints.forEach(function (waypoint, index) {
+      var item = document.createElement('div');
+      item.className = 'waypoint';
+
+      var label = document.createElement('b');
+      label.textContent = 'P' + (index + 1);
+      item.appendChild(label);
+
+      var coords = document.createElement('span');
+      coords.textContent =
+        'X ' + waypoint.x.toFixed(2) +
+        ' · Y ' + waypoint.y.toFixed(2) +
+        ' · Z ' + waypoint.z.toFixed(2) + ' м';
+      item.appendChild(coords);
+
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'icon-button';
+      remove.dataset.waypointIndex = String(index);
+      remove.title = 'Удалить точку';
+      remove.textContent = '×';
+      item.appendChild(remove);
+      ui.waypointList.appendChild(item);
+    });
+
+    var distance = 0;
+    for (var index = 1; index < state.waypoints.length; index += 1) {
+      var previous = state.waypoints[index - 1];
+      var current = state.waypoints[index];
+      distance += Math.hypot(
+        current.x - previous.x,
+        current.y - previous.y,
+        current.z - previous.z
+      );
+    }
+    ui.routeStats.textContent =
+      state.waypoints.length + ' точек · длина ' + distance.toFixed(2) + ' м';
+    drawMap();
+    updateControlAvailability();
+  }
+
+  function updateControlAvailability() {
+    var unavailable = !state.mavConnected || state.commandBusy;
+    ui.arm.disabled = unavailable;
+    ui.disarm.disabled = unavailable;
+    ui.setMode.disabled = unavailable;
+    ui.uploadMission.disabled = unavailable || !state.waypoints.length;
+    ui.startMission.disabled = unavailable || !state.missionUploaded;
+  }
+
+  function mavStatusLabel(data) {
+    var parts = ['MAVLink: подключён'];
+    var telemetry = data.telemetry && typeof data.telemetry === 'object'
+      ? data.telemetry
+      : {};
+    var systemId = data.system_id;
+    if (systemId === undefined) {
+      systemId = data.target_system;
+    }
+    if (systemId !== undefined && systemId !== null) {
+      parts.push('SYS ' + systemId);
+    }
+    var mode = typeof data.mode === 'string' ? data.mode : telemetry.mode;
+    var armed = typeof data.armed === 'boolean' ? data.armed : telemetry.armed;
+    if (typeof mode === 'string' && mode) {
+      parts.push(mode);
+    }
+    if (typeof armed === 'boolean') {
+      parts.push(armed ? 'ARMED' : 'DISARMED');
+    }
+    return parts.join(' · ');
+  }
+
+  async function pollMavlinkStatus() {
+    if (state.mavStatusPollBusy) {
+      return;
+    }
+    state.mavStatusPollBusy = true;
+    try {
+      var data = await apiRequest('/api/mavlink/status', { cache: 'no-store' });
+      state.mavStatusKnown = true;
+      state.mavConnected = data.connected === true;
+      // Server readiness may only invalidate local state.  It must not mark an
+      // unknown route (after reload/edit) as uploaded; only uploadMission can
+      // bind the currently displayed route revision to the FC mission.
+      if (!state.mavConnected || data.mission_ready !== true) {
+        state.missionUploaded = false;
+      }
+      ui.mavDot.classList.remove('wait');
+      ui.mavDot.classList.toggle('ok', state.mavConnected);
+
+      if (state.mavConnected) {
+        ui.mavState.textContent = mavStatusLabel(data);
+        var telemetry = data.telemetry && typeof data.telemetry === 'object'
+          ? data.telemetry
+          : {};
+        var currentMode = typeof data.mode === 'string' ? data.mode : telemetry.mode;
+        if (typeof currentMode === 'string' &&
+            Array.from(ui.flightMode.options).some(function (option) { return option.value === currentMode; }) &&
+            document.activeElement !== ui.flightMode) {
+          ui.flightMode.value = currentMode;
+        }
+      } else if (data.configured === false) {
+        ui.mavState.textContent = 'MAVLink: не настроен';
+      } else {
+        ui.mavState.textContent = 'MAVLink: нет heartbeat';
+      }
+    } catch (error) {
+      state.mavStatusKnown = true;
+      state.mavConnected = false;
+      state.missionUploaded = false;
+      ui.mavDot.classList.remove('ok', 'wait');
+      ui.mavState.textContent = 'MAVLink: ' + error.message;
+    } finally {
+      state.mavStatusPollBusy = false;
+      updateControlAvailability();
+    }
+  }
+
+  async function executeCommand(path, body, confirmation, statusElement, successText) {
+    if (!state.mavConnected) {
+      setPanelStatus(statusElement, 'Команда заблокирована: MAVLink не подключён.', 'bad');
+      return null;
+    }
+    if (confirmation && !window.confirm(confirmation)) {
+      return null;
+    }
+
+    state.commandBusy = true;
+    updateControlAvailability();
+    setPanelStatus(statusElement, 'Передача команды…', 'warning');
+    try {
+      var data = await jsonPost(path, body);
+      setPanelStatus(statusElement, responseMessage(data, successText), 'good');
+      return data;
+    } catch (error) {
+      if (error.status === 503) {
+        state.mavConnected = false;
+      }
+      setPanelStatus(statusElement, 'Ошибка: ' + error.message, 'bad');
+      return null;
+    } finally {
+      state.commandBusy = false;
+      updateControlAvailability();
+      pollMavlinkStatus();
+    }
+  }
+
+  async function uploadMission() {
+    if (!state.waypoints.length) {
+      setPanelStatus(ui.missionStatus, 'Добавьте хотя бы одну точку.', 'bad');
+      return;
+    }
+    var uploadRevision = state.routeRevision;
+    var uploadWaypoints = state.waypoints.map(function (waypoint) {
+      return { x: waypoint.x, y: waypoint.y, z: waypoint.z };
+    });
+    var data = await executeCommand(
+      '/upload_route',
+      uploadWaypoints,
+      'Загрузить ' + uploadWaypoints.length + ' точек в настоящий автопилот по MAVLink?',
+      ui.missionStatus,
+      'Миссия принята автопилотом.'
     );
-    sphere.position.copy(wp);
-    waypointsGroup.add(sphere);
+    if (data && state.routeRevision === uploadRevision) {
+      state.missionUploaded = true;
+      updateControlAvailability();
+    } else if (data) {
+      state.missionUploaded = false;
+      setPanelStatus(
+        ui.missionStatus,
+        'Автопилот принял предыдущую версию маршрута. Загрузите текущую версию заново.',
+        'warning'
+      );
+    }
+  }
 
-    // 3D Подпись P1, P2...
-    const label = makeLabel(`P${index + 1}`, '#ffaa00', 0.35);
-    label.position.set(wp.x, wp.y, wp.z + 0.3);
-    waypointsGroup.add(label);
+  async function startMission() {
+    await executeCommand(
+      '/action/mission/start',
+      undefined,
+      'Отправить настоящему автопилоту команду MAV_CMD_MISSION_START?',
+      ui.missionStatus,
+      'Запуск миссии подтверждён автопилотом.'
+    );
+  }
 
-    // HTML-элемент в панели с КРЕСТИКОМ ✖
-    const wpDiv = document.createElement('div');
-    wpDiv.className = 'wp-item';
-    wpDiv.innerHTML = `
-      <span><b>P${index + 1}</b> [${wp.x.toFixed(1)}, ${wp.y.toFixed(1)}]</span>
-      <span class="wp-del" onclick="deleteWaypoint(${index})" title="Удалить точку">✖</span>
-    `;
-    listEl.appendChild(wpDiv);
+  function startRecording() {
+    state.recording = true;
+    state.recordStartedAt = Date.now();
+    state.recordRows = [];
+    ui.recordNote.disabled = true;
+    ui.record.textContent = '■ Остановить и скачать';
+    ui.record.classList.add('danger');
+    setPanelStatus(ui.recordStatus, 'Запись активной метки начата.', 'good');
+  }
+
+  function stopRecording() {
+    state.recording = false;
+    ui.recordNote.disabled = false;
+    ui.record.textContent = '● Начать запись';
+    ui.record.classList.remove('danger');
+
+    if (!state.recordRows.length) {
+      setPanelStatus(ui.recordStatus, 'За время записи не получено ни одного пакета активной метки.', 'bad');
+      return;
+    }
+
+    var newline = String.fromCharCode(13, 10);
+    var note = ui.recordNote.value.trim();
+    note = note.split(String.fromCharCode(10)).join(' ');
+    note = note.split(String.fromCharCode(13)).join(' ');
+    var lines = [
+      '# Заметка: ' + (note || 'без заметки'),
+      '# Дата: ' + new Date().toLocaleString(),
+      '# Координаты исходные, без искусственного смещения и без EMA',
+      'Time_s,Tag_ID,X_m,Y_m,Z_m,UWB_Voltage_V'
+    ];
+    state.recordRows.forEach(function (row) {
+      lines.push(row.join(','));
+    });
+
+    var blob = new Blob(
+      [String.fromCharCode(0xfeff) + lines.join(newline) + newline],
+      { type: 'text/csv;charset=utf-8' }
+    );
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'blimp_uwb_' + Date.now() + '.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 1000);
+    setPanelStatus(ui.recordStatus, 'Сохранено пакетов: ' + state.recordRows.length + '.', 'good');
+  }
+
+  function connectWebSocket() {
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var ws = new WebSocket(protocol + '//' + location.host + '/ws');
+    state.ws = ws;
+    ui.wsState.textContent = 'WebSocket: подключение…';
+
+    ws.onopen = function () {
+      state.wsConnected = true;
+      state.wsOpenedAt = Date.now();
+      ui.wsDot.classList.add('ok');
+      ui.wsState.textContent = 'WebSocket подключён';
+      updateRealtimeStatus();
+    };
+    ws.onmessage = function (event) {
+      try {
+        handleUwbFrame(JSON.parse(event.data));
+      } catch (error) {
+        console.warn('Пропущен некорректный кадр дашборда:', error);
+      }
+    };
+    ws.onclose = function () {
+      if (state.ws !== ws) {
+        return;
+      }
+      state.wsConnected = false;
+      ui.wsDot.classList.remove('ok');
+      ui.wsState.textContent = 'WebSocket отключён';
+      state.reconnectTimer = window.setTimeout(connectWebSocket, 1000);
+      updateRealtimeStatus();
+    };
+    ws.onerror = function () {
+      ws.close();
+    };
+  }
+
+  ui.ema.addEventListener('input', function () {
+    ui.emaValue.textContent = Number(ui.ema.value).toFixed(2);
   });
-}
+  ui.showTrail.addEventListener('change', drawMap);
+  ui.showRanges.addEventListener('change', drawMap);
+  ui.clearTrail.addEventListener('click', function () {
+    state.trail = [];
+    drawMap();
+  });
+  ui.reloadAnchors.addEventListener('click', loadAnchors);
+  ui.saveAnchors.addEventListener('click', saveAnchors);
 
-// Задача 5: Функция калькулятора параметров пути (длина и время)
-function updateRouteStats() {
-  const statsEl = document.getElementById('route-stats');
-  if (waypoints.length < 2) {
-    statsEl.style.display = 'none';
-    return;
-  }
-
-  let totalDist = 0;
-  for (let i = 1; i < waypoints.length; i++) {
-    // Считаем 3D-расстояние между соседними точками вектора
-    totalDist += waypoints[i].distanceTo(waypoints[i - 1]);
-  }
-
-  // Примерное время полета исходя из средней скорости блимпа ~0.3 м/с
-  const estTime = Math.round(totalDist / 0.3);
-
-  statsEl.textContent = `Длина: ${totalDist.toFixed(2)} м | Время: ~${estTime} сек`;
-  statsEl.style.display = 'block';
-}
-
-// Глобальная функция для удаления точки (крестик вызывает её по index)
-window.deleteWaypoint = (index) => {
-  waypoints.splice(index, 1); // Магия здесь: splice вырезает ровно 1 точку
-  updateWaypointsVisuals();   // При перерисовке линии соседи соединятся сами
-};
-
-// Глобальная функция очистки всего маршрута
-window.clearWaypoints = () => {
-  waypoints = [];
-  updateWaypointsVisuals();
-};
-
-// Глобальная функция отправки на сервер
-window.sendMission = () => {
-  if (waypoints.length === 0) return alert("Добавьте точки маршрута!");
-
-  const missionData = waypoints.map(wp => ({ x: wp.x, y: wp.y, z: wp.z }));
-
-  fetch('/upload_route', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(missionData)
-  }).then(res => {
-    if(res.ok) {
-        // Меняем цвет линии на зеленый в знак успеха
-        waypointsGroup.children[0].material.color.setHex(0x2bd96f);
+  ui.addWaypoint.addEventListener('click', addWaypointFromInputs);
+  [ui.waypointX, ui.waypointY, ui.waypointZ].forEach(function (input) {
+    input.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        addWaypointFromInputs();
+      }
+    });
+  });
+  ui.waypointList.addEventListener('click', function (event) {
+    var button = event.target.closest('button[data-waypoint-index]');
+    if (!button) {
+      return;
     }
-  }).catch(err => console.error(err));
-};
+    state.waypoints.splice(Number(button.dataset.waypointIndex), 1);
+    state.routeRevision += 1;
+    state.missionUploaded = false;
+    renderWaypoints();
+    setPanelStatus(ui.missionStatus, 'Точка удалена; миссию нужно загрузить заново.', 'warning');
+  });
+  ui.clearWaypoints.addEventListener('click', function () {
+    state.waypoints = [];
+    state.routeRevision += 1;
+    state.missionUploaded = false;
+    renderWaypoints();
+    setPanelStatus(ui.missionStatus, 'Маршрут очищен.', null);
+  });
+  ui.uploadMission.addEventListener('click', uploadMission);
+  ui.startMission.addEventListener('click', startMission);
 
-// Инициализация пустой панели при старте
-updateWaypointsVisuals();
-// ----------------------------------------------------------------
-
-// ---------------------------------------------------------------- frames
-let frameCount = 0, lastVoltage = null;
-
-function handleFrame(f) {
-  // --- [НОВОЕ] Отрисовка симулятора ---
-  if (f.frame_type === 'sitl_frame') {
-    // Двигаем синий каркасный шар в позицию, которую прислал SITL
-    sitlBody.position.set(f.x, f.y, f.z);
-    sitlBody.visible = true;
-
-    // Обновляем режим полетника на левой панели
-    if (f.mode) {
-      document.getElementById('control-mode').textContent = `${f.mode} (СИМУЛЯТОР)`;
-      document.getElementById('control-mode').style.color = '#4ea1ff';
+  ui.map.addEventListener('dblclick', function (event) {
+    if (!state.mapView) {
+      return;
     }
-    return; // Выходим, так как в этом кадре нет UWB-тегов
-  }
-  // 1. Обновляем статус режима полета на дашборде (если автопилот прислал данные)
-  const mode = f.mode || f.flight_mode;
-  if (mode) {
-    const modeEl = document.getElementById('control-mode');
-    if (['MANUAL', 'STABILIZE', 'ALT_HOLD'].includes(mode)) {
-      modeEl.textContent = `${mode} (ПИЛОТ)`;
-      modeEl.style.color = '#4ea1ff'; // Синий для ручного контроля
-    } else if (['GUIDED', 'AUTO'].includes(mode)) {
-      modeEl.textContent = `${mode} (АВТОПИЛОТ)`;
-      modeEl.style.color = '#2bd96f'; // Зеленый для автономии
+    var rect = ui.map.getBoundingClientRect();
+    var mapX = event.clientX - rect.left;
+    var mapY = event.clientY - rect.top;
+    var x = state.mapView.centerX - (mapY - state.mapView.height / 2) / state.mapView.scale;
+    var y = state.mapView.centerY + (mapX - state.mapView.width / 2) / state.mapView.scale;
+    var z = finiteNumber(ui.waypointZ.value);
+    addWaypoint(x, y, z === null ? 1.2 : z);
+  });
+
+  ui.arm.addEventListener('click', function () {
+    executeCommand(
+      '/action/arm',
+      undefined,
+      'Отправить ARM настоящему дирижаблю?',
+      ui.commandStatus,
+      'Команда ARM подтверждена автопилотом.'
+    );
+  });
+  ui.disarm.addEventListener('click', function () {
+    executeCommand(
+      '/action/disarm',
+      undefined,
+      'Отправить DISARM настоящему дирижаблю?',
+      ui.commandStatus,
+      'Команда DISARM подтверждена автопилотом.'
+    );
+  });
+  ui.setMode.addEventListener('click', function () {
+    var mode = ui.flightMode.value;
+    executeCommand(
+      '/action/mode',
+      { mode: mode },
+      'Переключить настоящий автопилот в режим ' + mode + '?',
+      ui.commandStatus,
+      'Режим ' + mode + ' подтверждён автопилотом.'
+    );
+  });
+  ui.record.addEventListener('click', function () {
+    if (state.recording) {
+      stopRecording();
     } else {
-      modeEl.textContent = mode;
-      modeEl.style.color = '#e8eefc';
+      startRecording();
     }
-  }
-
-  // 2. Если это системный кадр, а не координаты — дальше не идем
-  if (f.frame_type !== 'anchorframe0') return;
-
-  // ==========================================================
-  // НАСТРОЙКА ДЛЯ ОТЧЕТА: Фейковый подъем дирижабля (в метрах)
-  // Установите значение 0.0, когда закончите делать скриншоты!
-  const FAKE_Z_OFFSET = 1.5;
-  // ==========================================================
-
-  frameCount++;
-  lastVoltage = f.voltage;
-
-  const alpha = Number(document.getElementById('opt-ema').value);
-  const currentMode = document.getElementById('control-mode').textContent || '—';
-  const elapsedSeconds = isRecording ? ((Date.now() - recordStartTime) / 1000).toFixed(3) : '0';
-  const present = new Set();
-
-  // 3. Единый цикл: обрабатываем метки сразу и для 3D-карты, и для записи CSV-лога
-  for (const n of f.nodes ?? []) {
-    if (n.role !== 2) continue; // Работаем только с метками (Tag)
-
-    present.add(n.id);
-    const tag = tags.get(n.id) ?? makeTag(n.id);
-
-    // ПРИМЕНЯЕМ ПОДЪЕМ ДЛЯ ОТЧЕТА:
-    // Поднимаем ось Z (индекс 2 в массиве) до всех вычислений.
-    // Благодаря этому дирижабль поднимется и на экране, и в записанном CSV-файле!
-    n.pos_3d[2] += FAKE_Z_OFFSET;
-
-    // --- ЛОГИРОВАНИЕ ---
-    if (isRecording) {
-      recordedData.push([
-        elapsedSeconds,
-        n.id,
-        n.pos_3d[0].toFixed(3), // X
-        n.pos_3d[1].toFixed(3), // Y
-        n.pos_3d[2].toFixed(3), // Z
-        lastVoltage !== null ? lastVoltage.toFixed(2) : '',
-        currentMode
-      ]);
-    }
-
-    // --- 3D ВИЗУАЛИЗАЦИЯ ---
-    const p = new THREE.Vector3(...n.pos_3d);
-
-    // Сглаживание координат (EMA-фильтр)
-    tag.pos = tag.pos ? tag.pos.lerp(p, alpha) : p;
-    tag.lastDis = n.dis_arr;
-
-    // Перемещаем 3D-сферу и текстовую метку
-    tag.mesh.position.copy(tag.pos);
-    tag.label.position.set(tag.pos.x, tag.pos.y, tag.pos.z + 0.22);
-
-    // Рисуем трейл (хвост маршрута) каждый 3-й кадр для оптимизации
-    if (document.getElementById('opt-trails').checked && frameCount % 3 === 0) {
-      pushTrail(tag, tag.pos);
-    }
-  }
-
-  // 4. Обновляем счетчики видимости меток (статистика в левой панели)
-  for (const [id, tag] of tags) {
-    tag.total++;
-    if (present.has(id)) tag.seen++;
-  }
-
-  // 5. Перерисовываем составные объекты на основе новых координат
-  updateBlimp();  // Отрисовка корпуса дирижабля между носом и кормой
-  updateRanges(); // Отрисовка линий дальностей к якорям
-}
-
-document.getElementById('opt-trails').addEventListener('change', (e) => {
-  for (const tag of tags.values()) tag.trail.visible = e.target.checked;
-});
-document.getElementById('btn-clear').addEventListener('click', () => {
-  for (const tag of tags.values()) {
-    tag.trailPts = tag.trailIdx = 0;
-    tag.trail.geometry.setDrawRange(0, 0);
-  }
-});
-document.getElementById('opt-ema').addEventListener('input', (e) => {
-  document.getElementById('ema-val').textContent = Number(e.target.value).toFixed(2);
-});
-
-// Обработчик кнопки записи лога теста
-const btnRecord = document.getElementById('btn-record');
-const inputNotes = document.getElementById('log-notes');
-
-btnRecord.addEventListener('click', () => {
-  if (!isRecording) {
-    // ЗАПУСК ЗАПИСИ
-    isRecording = true;
-    recordStartTime = Date.now();
-    recordedData = []; // Очищаем старые данные
-
-    btnRecord.textContent = '■ Остановить и скачать';
-    btnRecord.style.background = '#e05252'; // Красный цвет кнопки
-    btnRecord.style.color = '#white';
-    inputNotes.disabled = true; // Блокируем поле ввода во время теста
-    console.log("Запись эксперимента запущена...");
-  } else {
-    // ОСТАНОВКА ЗАПИСИ И СКАЧИВАНИЕ
-    isRecording = false;
-    btnRecord.textContent = '● Начать запись';
-    btnRecord.style.background = '#1d2636';
-    btnRecord.style.color = '#e8eefc';
-    inputNotes.disabled = false; // Разблокируем поле ввода
-
-    console.log("Запись остановлена. Генерируем CSV...");
-    downloadCSV();
-  }
-});
-
-// Функция генерации и автоматического скачивания CSV файла браузером
-function downloadCSV() {
-  if (recordedData.length === 0) {
-    alert("Нет данных для сохранения! Возможно, дирижабль не прислал ни одного кадра.");
-    return;
-  }
-
-  const notes = inputNotes.value.trim() || "без_заметки";
-
-  let csvContent = "";
-  // Добавляем метаданные в шапку файла
-  csvContent += `# Эксперимент: ${notes}\r\n`;
-  csvContent += `# Дата записи: ${new Date().toLocaleString()}\r\n`;
-  csvContent += "Time_s,Tag_ID,X_m,Y_m,Z_m,Voltage_V,Flight_Mode\r\n";
-
-  recordedData.forEach(row => {
-    csvContent += row.join(",") + "\r\n";
   });
 
-  // Добавляем маркер BOM (\ufeff), чтобы Excel на Windows корректно читал русские буквы в заметках
-  const blob = new Blob(["\ufeff" + csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-
-  // Очищаем имя файла от недопустимых символов
-  const cleanNotes = notes.replace(/[^a-z0-9а-яё\s-_]/gi, '').replace(/\s+/g, '_');
-  const filename = `blimp_test_${cleanNotes}_${Date.now()}.csv`;
-
-  link.setAttribute("href", url);
-  link.setAttribute("download", filename);
-  document.body.appendChild(link);
-
-  link.click(); // Запускаем скачивание в браузере
-  document.body.removeChild(link);
-}
-
-// ---------------------------------------------------------------- HUD (Обновление каждые 500мс)
-setInterval(() => {
-  const currentRate = frameCount / 0.5;
-  document.getElementById('rate').textContent = `${currentRate.toFixed(0)} Гц`;
-
-  // --- Задача 2: Аварийный светофор Failsafe ---
-  const banner = document.getElementById('failsafe-banner');
-  let failsafeMsg = "";
-
-  if (currentRate === 0) {
-    // Если за полсекунды не пришло ни одного пакета UWB
-    failsafeMsg = "⚠️ ACCIDENT: UWB CONNECTION LOSS";
-  } else if (lastVoltage !== null && lastVoltage > 1.0 && lastVoltage < 7.00) {
-    // Если батарея дирижабля 2S разряжена ниже 7.0 Вольт
-    failsafeMsg = "⚠️ ACCIDENT: LOW BATTERY CHARGE 2S";
+  window.addEventListener('resize', drawMap);
+  if (window.ResizeObserver) {
+    new ResizeObserver(drawMap).observe(ui.map);
   }
 
-  if (failsafeMsg) {
-    banner.textContent = failsafeMsg;
-    banner.style.display = 'block';
-  } else {
-    banner.style.display = 'none';
-  }
-  // --------------------------------------------
-
-  frameCount = 0;
-  document.getElementById('voltage').textContent =
-    lastVoltage == null ? '— В' : `${lastVoltage.toFixed(2)} В`;
-
-  const el = document.getElementById('tags');
-  el.innerHTML = '';
-  for (const [id, tag] of [...tags].sort((a, b) => a[0] - b[0])) {
-    if (!tag.pos) continue;
-    const card = document.createElement('div');
-    card.className = 'tag-card';
-    const color = '#' + (TAG_COLORS[id] ?? 0x9aa7c1).toString(16).padStart(6, '0');
-    card.style.borderLeftColor = color;
-    const pct = tag.total ? (100 * tag.seen / tag.total).toFixed(0) : '—';
-    card.innerHTML =
-      `<div class="row"><span style="color:${color}">T${id} ${id === 1 ? 'нос' : id === 2 ? 'корма' : ''}</span>` +
-      `<span class="val">видим ${pct}%</span></div>` +
-      `<div class="row"><span>x y z</span><span class="val">` +
-      `${tag.pos.x.toFixed(2)} ${tag.pos.y.toFixed(2)} ${tag.pos.z.toFixed(2)}</span></div>`;
-    el.appendChild(card);
-  }
-}, 500);
-
-// ---------------------------------------------------------------- websocket
-function connect() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
-  const dot = document.getElementById('ws-dot');
-  ws.onopen = () => dot.classList.add('ok');
-  ws.onmessage = (e) => handleFrame(JSON.parse(e.data));
-  ws.onclose = () => { dot.classList.remove('ok'); setTimeout(connect, 1000); };
-  ws.onerror = () => ws.close();
-}
-connect();
-loadAnchors();
-
-renderer.setAnimationLoop(() => {
-  controls.update();
-  renderer.render(scene, camera);
-});
-
-// --- Новые команды прямого пилотирования (светофорная индикация) ---
-window.armBlimp = () => {
-  const btn = document.getElementById('btn-arm');
-
-  fetch('/action/arm', { method: 'POST' })
-    .then(res => {
-      if (res.ok) {
-        // Успех: перекрашиваем кнопку в зеленый, делаем текст читаемым
-        btn.style.background = '#2bd96f';
-        btn.style.color = '#0b0e14';
-      } else {
-        alert("Не удалось завести моторы (проверьте связь с SITL)!");
-      }
-    })
-    .catch(err => alert("Ошибка связи с сервером!"));
-};
-
-window.takeoffBlimp = () => {
-  const btn = document.getElementById('btn-takeoff');
-
-  fetch('/action/takeoff', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ alt: 1.2 }) // Взлет на высоту 1.2 метра
-  })
-    .then(res => {
-      if (res.ok) {
-        // Успех: перекрашиваем кнопку в зеленый
-        btn.style.background = '#2bd96f';
-        btn.style.color = '#0b0e14';
-      } else {
-        alert("Не удалось отправить команду взлета!");
-      }
-    })
-    .catch(err => alert("Ошибка связи с сервером!"));
-};
+  resetTrackedTag();
+  renderWaypoints();
+  connectWebSocket();
+  loadDashboardConfig();
+  loadAnchors();
+  pollMavlinkStatus();
+  window.setInterval(updateRealtimeStatus, 500);
+  window.setInterval(pollMavlinkStatus, 2000);
+})();
