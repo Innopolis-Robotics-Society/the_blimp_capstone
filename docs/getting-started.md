@@ -134,7 +134,7 @@ One-time prebuild on an internet-connected network:
 ```bash
 cd uwb
 docker compose --profile live build
-````
+```
 
 Live launch on the Backpack Wi-Fi network:
 
