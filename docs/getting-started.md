@@ -172,7 +172,15 @@ Expected states:
 
 ## Stop the system
 
-For native processes, press `Ctrl+C` in the parser and dashboard terminals. For Compose:
+Press `Ctrl+C` in the parser and dashboard terminals, or run the following commands.
+
+For replay mode:
+
+```bash
+docker compose --profile replay down
+```
+
+For live mode:
 
 ```bash
 docker compose --profile live down
