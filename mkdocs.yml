@@ -1,15 +1,19 @@
 site_name: The Blimp Capstone
-site_description: Technical documentation for the Blimp capstone project
+site_description: Engineering handbook for the autonomous indoor airship proof of concept
+site_url: https://innopolis-robotics-society.github.io/the_blimp_capstone/
 repo_url: https://github.com/Innopolis-Robotics-Society/the_blimp_capstone
 repo_name: Innopolis-Robotics-Society/the_blimp_capstone
 edit_uri: edit/main/docs/
+copyright: Innopolis Robotics Society · Stage 1 proof of concept · July 2026
 
 theme:
   name: material
   features:
     - navigation.sections
+    - navigation.expand
     - navigation.top
     - navigation.tracking
+    - navigation.footer
     - search.suggest
     - search.highlight
     - content.code.copy
@@ -31,7 +35,11 @@ theme:
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
+  - tables
   - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -43,7 +51,17 @@ markdown_extensions:
       permalink: true
 
 nav:
-  - Home: index.md
-  - Architecture: architecture.md
-  - Hardware: hardware.md
-  - Software: software.md
+  - Project:
+      - Overview: index.md
+      - System architecture: architecture.md
+      - Current status and roadmap: status.md
+  - Engineering:
+      - Hardware: hardware.md
+      - Software: software.md
+      - Configuration reference: configuration.md
+  - Use the system:
+      - Installation and launch: getting-started.md
+      - Operator procedure: operations.md
+      - Dashboard API: api.md
+  - Verification:
+      - Test and safety plan: testing.md
