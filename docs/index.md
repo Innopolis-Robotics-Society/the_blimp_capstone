@@ -59,5 +59,4 @@ flowchart LR
 - Use [Hardware](hardware.md) for the prototype bill of materials, interfaces, and measured constraints.
 - Use [Software](software.md) for package responsibilities and implementation details.
 - Follow [Installation and launch](getting-started.md) to run the live or replay pipeline.
-- Read [Operator procedure](operations.md) and [Test and safety plan](testing.md) before connecting a real vehicle.
-- Consult [Configuration reference](configuration.md) and [Dashboard API](api.md) during integration.
+- Consult [Dashboard API](api.md) during integration.

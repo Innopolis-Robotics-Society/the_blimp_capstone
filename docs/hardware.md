@@ -69,7 +69,7 @@ flowchart LR
 | P-A console | Raspberry Pi 5 | USB serial | NLink | Whole-network UWB monitoring |
 | Dashboard host | ELRS Backpack | Wi-Fi UDP or USB, to be verified | MAVLink | Mission upload, commands, and telemetry |
 
-The reported baseline for the tag is `Node_Frame2` at `921600` baud. The corresponding flight-controller serial port and parameters are installation-specific; see [Configuration reference](configuration.md).
+The reported baseline for the tag is `Node_Frame2` at `921600` baud. The corresponding flight-controller serial port and parameters are installation-specific and must be verified on the installed controller.
 
 ## UWB deployment
 
@@ -114,7 +114,7 @@ The report supports the broad sequence below, but not yet a reproducible build i
 9. Attach propellers only after arm/disarm and failsafe checks pass.
 10. Repeat lift, balance, and leak checks on the exact assembled configuration.
 
-Missing manufacturing artefacts are listed on [Current status and roadmap](status.md).
+A reproducible airframe still requires a frozen CAD revision, print settings, final mass table, motor map, battery specification, as-built wiring diagram, and tested failsafe configuration.
 
 ## Known physical hazards
 

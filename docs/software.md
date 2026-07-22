@@ -134,7 +134,7 @@ The test suites cover:
 - command packing, retries, source filtering, acceptance, and rejection;
 - both mission request variants and accepted mission completion.
 
-See [Test and safety plan](testing.md) for commands and the required hardware validation ladder.
+These repository-level tests do not replace validation with the physical UWB network, radio link, flight controller, and restrained airframe.
 
 ## Known software limitations
 
