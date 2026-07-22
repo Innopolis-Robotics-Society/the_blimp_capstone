@@ -1,0 +1,93 @@
+# Real system: one UWB tag -> dashboard, plus bidirectional MAVLink to the
+# physical autopilot. Replay is a separate UWB-only profile with MAVLink off.
+
+x-dashboard-command: &dashboard-command
+  - blimp-dashboard
+  - --http-port
+  - "8000"
+  - --udp-port
+  - "9999"
+  - --anchors
+  - /config/anchors.json
+
+x-dashboard-environment: &dashboard-environment
+  BLIMP_UWB_TAG_ID: ${BLIMP_UWB_TAG_ID:-1}
+  BLIMP_MAVLINK_BAUD: ${BLIMP_MAVLINK_BAUD:-115200}
+  BLIMP_MAVLINK_HEARTBEAT_TIMEOUT: ${BLIMP_MAVLINK_HEARTBEAT_TIMEOUT:-10}
+  BLIMP_MAVLINK_LINK_TIMEOUT: ${BLIMP_MAVLINK_LINK_TIMEOUT:-5}
+  BLIMP_MAVLINK_COMMAND_TIMEOUT: ${BLIMP_MAVLINK_COMMAND_TIMEOUT:-5}
+  BLIMP_MAVLINK_MISSION_TIMEOUT: ${BLIMP_MAVLINK_MISSION_TIMEOUT:-30}
+  BLIMP_MAVLINK_RECONNECT_DELAY: ${BLIMP_MAVLINK_RECONNECT_DELAY:-3}
+  BLIMP_MAVLINK_TARGET_SYSTEM: ${BLIMP_MAVLINK_TARGET_SYSTEM:-}
+  BLIMP_MAVLINK_TARGET_COMPONENT: ${BLIMP_MAVLINK_TARGET_COMPONENT:-}
+  BLIMP_ORIGIN_LAT: ${BLIMP_ORIGIN_LAT:-55.7522}
+  BLIMP_ORIGIN_LON: ${BLIMP_ORIGIN_LON:-48.7446}
+  BLIMP_ORIGIN_ALT: ${BLIMP_ORIGIN_ALT:-120.0}
+  BLIMP_SET_ORIGIN_ON_UPLOAD: ${BLIMP_SET_ORIGIN_ON_UPLOAD:-false}
+  BLIMP_MIN_MISSION_ALTITUDE: ${BLIMP_MIN_MISSION_ALTITUDE:-0.2}
+  BLIMP_MAX_MISSION_ALTITUDE: ${BLIMP_MAX_MISSION_ALTITUDE:-10.0}
+  BLIMP_MAX_WAYPOINT_DISTANCE: ${BLIMP_MAX_WAYPOINT_DISTANCE:-100.0}
+  BLIMP_MAX_MISSION_WAYPOINTS: ${BLIMP_MAX_MISSION_WAYPOINTS:-100}
+
+services:
+  dashboard:
+    profiles: [live]
+    build: .
+    command: *dashboard-command
+    environment:
+      <<: *dashboard-environment
+      BLIMP_MAVLINK_ENDPOINT: ${BLIMP_MAVLINK_ENDPOINT:-udpin:0.0.0.0:14550}
+    ports:
+      - "8000:8000"
+      - "14550:14550/udp"
+    volumes:
+      - ./dashboard/anchors.json:/config/anchors.json
+    # UDP mode maps /dev/null; set MAVLINK_SERIAL_DEVICE and use /dev/mavlink
+    # as BLIMP_MAVLINK_ENDPOINT to enable a real serial MAVLink endpoint.
+    devices:
+      - ${MAVLINK_SERIAL_DEVICE:-/dev/null}:/dev/mavlink
+    restart: unless-stopped
+
+  nlink:
+    profiles: [live]
+    build: .
+    command: sh -c 'nlink-dump --port "$$UWB_PORT" --baud "$$UWB_BAUD" --udp dashboard:9999 --quiet'
+    environment:
+      UWB_PORT: ${UWB_PORT:-/dev/ttyCH343USB0}
+      UWB_BAUD: ${UWB_BAUD:-921600}
+    devices:
+      - ${UWB_PORT:-/dev/ttyCH343USB0}:${UWB_PORT:-/dev/ttyCH343USB0}
+    depends_on: [dashboard]
+    restart: unless-stopped
+
+  dashboard-replay:
+    profiles: [replay]
+    build: .
+    command: *dashboard-command
+    environment:
+      <<: *dashboard-environment
+      # An empty endpoint is intentionally falsy in server.py: no real MAVLink.
+      BLIMP_MAVLINK_ENDPOINT: ""
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./dashboard/anchors.json:/config/anchors.json
+    restart: unless-stopped
+
+  replay:
+    profiles: [replay]
+    build: .
+    command:
+      - nlink-dump
+      - --replay
+      - /data/uwb_live.bin
+      - --replay-delay
+      - "0.05"
+      - --loop
+      - --udp
+      - dashboard-replay:9999
+      - --quiet
+    volumes:
+      - ./recordings:/data:ro
+    depends_on: [dashboard-replay]
+    restart: unless-stopped

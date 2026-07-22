@@ -1,0 +1,25 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nlink-py"
+version = "0.1.0"
+description = "Non-ROS parser for the Nooploop LinkTrack UWB NLink protocol with JSON-over-UDP streaming"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "BSD-3-Clause" }
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+nlink-dump = "nlink_py.cli:main"
+
+[tool.scikit-build]
+wheel.packages = ["src/nlink_py"]
+minimum-version = "0.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

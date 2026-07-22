@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blimp UWB — наземная станция</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d14;
+      --panel: #111826;
+      --panel-2: #151e2f;
+      --border: #2b3850;
+      --text: #e8eefc;
+      --muted: #8d9ab2;
+      --blue: #54a7ff;
+      --green: #37dc7a;
+      --yellow: #ffbd45;
+      --red: #ff6262;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+    body {
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+      padding: 16px;
+    }
+    button, input, select { font: inherit; }
+    button {
+      border: 1px solid #3a4c69;
+      border-radius: 7px;
+      background: #1c2a40;
+      color: var(--text);
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #263954; }
+    button:disabled { cursor: wait; opacity: .55; }
+    button.primary { background: #196b43; border-color: #299863; }
+    button.primary:hover:not(:disabled) { background: #238052; }
+    button.danger { background: #6e292d; border-color: #a84248; }
+    button.danger:hover:not(:disabled) { background: #873239; }
+    input, select {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #0d1420;
+      color: var(--text);
+      padding: 7px 8px;
+    }
+    input[type="number"] { width: 78px; }
+    input[type="range"] { width: 130px; padding: 0; }
+    input:focus, select:focus, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+    .app { width: min(1480px, 100%); margin: 0 auto; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    h1 { margin: 0; font-size: 19px; }
+    h2 { margin: 0 0 12px; font-size: 15px; }
+    h3 {
+      margin: 16px 0 7px;
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    .subtitle { margin-top: 2px; color: var(--muted); font-size: 12px; }
+    .connection-strip { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel);
+      padding: 6px 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); }
+    .dot.ok { background: var(--green); }
+    .dot.wait { background: var(--yellow); }
+
+    #alert {
+      display: none;
+      margin-bottom: 12px;
+      border: 1px solid #9b4449;
+      border-radius: 8px;
+      background: #482126;
+      color: #ffd9dc;
+      padding: 9px 12px;
+    }
+    #alert.visible { display: block; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(240px, 290px) minmax(420px, 1fr) minmax(280px, 330px);
+      gap: 14px;
+      align-items: start;
+    }
+    .column { display: grid; gap: 14px; }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.18);
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 6px 0;
+    }
+    .value { font-variant-numeric: tabular-nums; color: var(--text); text-align: right; }
+    .muted { color: var(--muted); }
+    .good { color: var(--green); }
+    .bad { color: var(--red); }
+    .warning { color: var(--yellow); }
+
+    .tag-position {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 7px;
+      margin: 10px 0;
+    }
+    .metric {
+      border: 1px solid #26344a;
+      border-radius: 8px;
+      background: #0d1420;
+      padding: 8px;
+      text-align: center;
+    }
+    .metric span { display: block; color: var(--muted); font-size: 11px; }
+    .metric strong { display: block; margin-top: 3px; font-size: 17px; font-variant-numeric: tabular-nums; }
+    .inline-form { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .inline-form label { color: var(--muted); font-size: 12px; }
+    .inline-form input { flex: 1 1 65px; }
+    .checks { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 12px; }
+    .checks label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+
+    #map-wrap {
+      position: relative;
+      min-height: 520px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0a101a;
+    }
+    #map { display: block; width: 100%; height: 520px; }
+    .map-help {
+      position: absolute;
+      left: 10px;
+      bottom: 9px;
+      border-radius: 6px;
+      background: rgba(9,13,20,.8);
+      color: var(--muted);
+      padding: 5px 8px;
+      pointer-events: none;
+      font-size: 11px;
+    }
+    .map-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .legend-mark { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 50%; }
+
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { border-bottom: 1px solid #243146; padding: 6px 4px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-size: 11px; font-weight: 500; }
+    #anchors-table input { width: 62px; padding: 5px; }
+
+    .command-note {
+      margin: -4px 0 10px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .command-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .command-grid button { width: 100%; }
+    .field {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      margin: 9px 0;
+    }
+    .status-box {
+      min-height: 40px;
+      margin-top: 10px;
+      border: 1px solid #29384e;
+      border-radius: 7px;
+      background: #0d1420;
+      color: var(--muted);
+      padding: 8px 9px;
+      font-size: 12px;
+    }
+
+    .waypoint-form {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(55px, 1fr)) auto;
+      gap: 6px;
+      align-items: end;
+    }
+    .waypoint-form label { color: var(--muted); font-size: 11px; }
+    .waypoint-form input { width: 100%; margin-top: 3px; }
+    #waypoint-list {
+      max-height: 210px;
+      margin: 10px 0;
+      overflow: auto;
+      border-top: 1px solid #243146;
+    }
+    .waypoint {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 7px;
+      border-bottom: 1px solid #243146;
+      padding: 7px 2px;
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+    }
+    .waypoint b { color: var(--yellow); }
+    .icon-button { width: 30px; padding: 4px; color: #ff9090; }
+    .button-row { display: flex; gap: 7px; }
+    .button-row button { flex: 1; }
+
+    #record-note { width: 100%; }
+
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 260px 1fr; }
+      .right-column { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(280px, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      body { padding: 10px; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .connection-strip { justify-content: flex-start; }
+      .layout { display: flex; flex-direction: column; }
+      .column, .right-column { width: 100%; display: grid; grid-template-columns: 1fr; }
+      .map-column { order: -1; width: 100%; }
+      #map-wrap { min-height: 360px; }
+      #map { height: 360px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>🎈 Blimp UWB — наземная станция</h1>
+        <div class="subtitle">Одна UWB-метка · команды настоящему автопилоту по MAVLink</div>
+      </div>
+      <div class="connection-strip">
+        <span class="pill"><span id="ws-dot" class="dot"></span><span id="ws-state">WebSocket отключён</span></span>
+        <span class="pill"><span id="uwb-dot" class="dot"></span><span id="uwb-state">UWB: нет данных</span></span>
+        <span class="pill"><span id="mav-dot" class="dot wait"></span><span id="mav-state">MAVLink: проверка…</span></span>
+      </div>
+    </header>
+
+    <div id="alert" role="alert"></div>
+
+    <div class="layout">
+      <section class="column">
+        <div class="panel">
+          <h2>Единственная UWB-метка</h2>
+          <div class="row"><span>ID в конфигурации сервера</span><strong id="configured-tag" class="value">загрузка…</strong></div>
+          <div class="command-note">ID задаётся параметром запуска сервера. Дашборд не переключается на другие метки.</div>
+          <div class="row"><span>активная метка</span><strong id="active-tag" class="value">—</strong></div>
+          <div class="tag-position">
+            <div class="metric"><span>X, м</span><strong id="tag-x">—</strong></div>
+            <div class="metric"><span>Y, м</span><strong id="tag-y">—</strong></div>
+            <div class="metric"><span>Z UWB, м</span><strong id="tag-z">—</strong></div>
+          </div>
+          <div class="row"><span>частота</span><span id="uwb-rate" class="value">— Гц</span></div>
+          <div class="row"><span>напряжение UWB</span><span id="uwb-voltage" class="value">— В</span></div>
+          <div class="row"><span>последний пакет</span><span id="uwb-age" class="value">—</span></div>
+
+          <h3>Отображение</h3>
+          <div class="checks">
+            <label><input type="checkbox" id="show-trail" checked> трек</label>
+            <label><input type="checkbox" id="show-ranges" checked> дальности</label>
+          </div>
+          <div class="row">
+            <label for="ema">сглаживание α</label>
+            <span><input type="range" id="ema" min="0.05" max="1" step="0.05" value="0.25"> <span id="ema-value" class="value">0.25</span></span>
+          </div>
+          <button id="clear-trail" type="button">Очистить трек</button>
+        </div>
+
+        <div class="panel">
+          <h2>Якоря UWB</h2>
+          <table id="anchors-table">
+            <thead><tr><th>ID</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="button-row">
+            <button id="reload-anchors" type="button">Отменить</button>
+            <button id="save-anchors" type="button" class="primary">Сохранить</button>
+          </div>
+          <div id="anchor-status" class="status-box">Координаты используются только для плана и проверки дальностей.</div>
+        </div>
+      </section>
+
+      <section class="column map-column">
+        <div class="panel">
+          <h2>План рабочей зоны</h2>
+          <div id="map-wrap">
+            <canvas id="map"></canvas>
+            <div class="map-help">Вид сверху: X — север, Y — восток. Двойной клик добавляет точку миссии.</div>
+          </div>
+          <div class="map-legend">
+            <span><i class="legend-mark" style="background:#37dc7a"></i>UWB-метка</span>
+            <span><i class="legend-mark" style="background:#54a7ff"></i>якорь</span>
+            <span><i class="legend-mark" style="background:#ffbd45"></i>точка миссии</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="column right-column">
+        <div class="panel">
+          <h2>Команды настоящему дирижаблю</h2>
+          <p class="command-note">Backend формирует MAVLink-пакеты и отправляет команды только подключённому реальному борту.</p>
+          <div class="command-grid">
+            <button id="arm" type="button" class="danger">ARM</button>
+            <button id="disarm" type="button">DISARM</button>
+          </div>
+          <div class="field">
+            <label for="flight-mode">Режим автопилота</label>
+            <select id="flight-mode">
+              <option value="MANUAL">MANUAL</option>
+              <option value="VELOCITY">VELOCITY</option>
+              <option value="LOITER">LOITER</option>
+              <option value="RTL">RTL</option>
+              <option value="LAND">LAND</option>
+              <option value="AUTO">AUTO</option>
+            </select>
+          </div>
+          <button id="set-mode" type="button" style="width:100%">Передать режим по MAVLink</button>
+          <div id="command-status" class="status-box">Состояние MAVLink-канала проверяется через backend.</div>
+        </div>
+
+        <div class="panel">
+          <h2>Миссия</h2>
+          <div class="waypoint-form">
+            <label>X, м<input id="wp-x" type="number" step="0.1" value="0"></label>
+            <label>Y, м<input id="wp-y" type="number" step="0.1" value="0"></label>
+            <label>Высота над Home FC, м<input id="wp-z" type="number" min="0.2" max="10" step="0.1" value="1.2"></label>
+            <button id="add-waypoint" type="button">+</button>
+          </div>
+          <p class="command-note">Z метки измеряется от нуля UWB, а Z миссии — от Home автопилота. Перед полётом совместите эти системы высот.</p>
+          <div id="waypoint-list"></div>
+          <div id="route-stats" class="command-note">Маршрут пуст.</div>
+          <div class="button-row">
+            <button id="clear-waypoints" type="button">Очистить</button>
+            <button id="upload-mission" type="button" class="primary">Передать по MAVLink</button>
+          </div>
+          <button id="start-mission" type="button" style="width:100%; margin-top:8px">Запустить загруженную миссию</button>
+          <div id="mission-status" class="status-box">Добавьте точки в локальной системе координат.</div>
+        </div>
+
+        <div class="panel">
+          <h2>Запись UWB</h2>
+          <input id="record-note" type="text" placeholder="Заметка к эксперименту">
+          <button id="record" type="button" style="width:100%; margin-top:8px">● Начать запись</button>
+          <div id="record-status" class="command-note" style="margin-top:7px">Записывается только активная метка, без искусственного смещения координат.</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
