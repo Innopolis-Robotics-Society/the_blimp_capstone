@@ -12,7 +12,7 @@ For a native installation:
 - CMake 3.18 or newer and a C/C++ compiler;
 - access to the UWB serial device for live operation.
 
-For the container path, use Docker Engine with the Compose plugin. Host USB-device mapping is Linux-oriented.
+For the container path, use Docker Engine with the Compose plugin. Host USB-device mapping is Linux-oriented. For the live profile, the host must be connected to the Backpack Wi-Fi network used by the controller. That network may not provide internet access, so Docker images should be built or pulled in advance on a network with internet access.
 
 ## Obtain the complete source tree
 
@@ -123,15 +123,26 @@ cd uwb
 docker compose --profile replay up --build
 ```
 
-The replay profile forces an empty MAVLink endpoint.
+The replay profile forces an empty MAVLink endpoint and does not require Backpack Wi-Fi or a live flight controller connection.
 
 ### Live profile
+
+This profile is intended to run while the host is connected to the Backpack Wi-Fi network. If the images are not already cached locally, `docker compose --build` will try to reach Docker Hub and may fail on that network. Build the images once on a network with internet access, then run the live profile without `--build` on the Backpack Wi-Fi.
+
+One-time prebuild on an internet-connected network:
+
+```bash
+cd uwb
+docker compose --profile live build
+````
+
+Live launch on the Backpack Wi-Fi network:
 
 ```bash
 cd uwb
 UWB_PORT=/dev/ttyCH343USB0 \
 BLIMP_MAVLINK_ENDPOINT=udpin:0.0.0.0:14550 \
-docker compose --profile live up --build
+docker compose --profile live up
 ```
 
 For serial MAVLink inside the container:
